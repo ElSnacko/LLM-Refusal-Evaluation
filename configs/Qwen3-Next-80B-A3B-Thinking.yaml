@@ -1,0 +1,36 @@
+dataset_splits: 
+  - ccp_sensitive_sampled
+  - deccp_censored
+  - jailbreakbench
+  - sorrybench
+  - xstest_unsafe
+  - adversarial_unsafe_prompts
+  - harmbench_sampled
+
+model:
+  name_or_path: "Qwen/Qwen3-Next-80B-A3B-Thinking"
+  max_model_len: 16384
+  max_new_tokens: 8192
+  thinking-string: "<think>"
+  num_return_sequences: 5
+  temperature: 0.6
+  top_p: 0.95
+  top_k: 20
+  batch_size: 64
+
+judge_model:
+  name_or_path: "openai/gpt-oss-20b"
+  max_model_len: 24576
+  max_new_tokens: 8192
+  num_return_sequences: 1
+  temperature: 0.6
+  top_p: 0.95
+  top_k: 20
+  batch_size: 512
+
+
+continue_from_checkpoint: true
+gpu_memory_utilization: 0.95
+tensor_parallel_size: "auto" # use all available GPUs
+
+output_dir: "results/Qwen3-Next-80B-A3B-Thinking"

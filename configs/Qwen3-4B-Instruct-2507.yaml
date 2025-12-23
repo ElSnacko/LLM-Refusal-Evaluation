@@ -1,0 +1,32 @@
+dataset_splits: 
+  - deccp_censored
+  - general_prompts
+
+
+model:
+  name_or_path: "Qwen/Qwen3-4B-Instruct-2507"
+  max_model_len: 16384
+  max_new_tokens: 8192
+  thinking-string: null
+  num_return_sequences: 5
+  temperature: 0.6
+  top_p: 0.95
+  top_k: 20
+  batch_size: 512
+
+judge_model:
+  name_or_path: "openai/gpt-oss-20b"
+  max_model_len: 24576
+  max_new_tokens: 8192
+  num_return_sequences: 1
+  temperature: 0.6
+  top_p: 0.95
+  top_k: 20
+  batch_size: 512
+
+
+continue_from_checkpoint: true
+gpu_memory_utilization: 0.95
+tensor_parallel_size: "auto" # use all available GPUs
+
+output_dir: "results/Qwen3-4B-Instruct-2507"
