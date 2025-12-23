@@ -271,9 +271,4 @@ If you use this library in your research, please cite:
 ```
 
 
-<div align="center">
-
-**Made with ❤️ by [Multiverse Computing](https://multiversecomputing.com)**
-
-</div>
 
