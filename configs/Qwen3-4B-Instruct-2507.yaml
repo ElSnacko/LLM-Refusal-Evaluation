@@ -1,10 +1,10 @@
 dataset_splits: 
-  - deccp_censored
+  - JailbreakBench/JBB-Behaviors
   - general_prompts
 
 
 model:
-  name_or_path: "Qwen/Qwen3-4B-Instruct-2507"
+  name_or_path: "../../../../models/huggingface/Qwen/Qwen3-4B-Instruct-2507"
   max_model_len: 16384
   max_new_tokens: 8192
   thinking-string: null
@@ -15,7 +15,7 @@ model:
   batch_size: 512
 
 judge_model:
-  name_or_path: "openai/gpt-oss-20b"
+  name_or_path: "../../../../models/huggingface/openai/gpt-oss-20b"
   max_model_len: 24576
   max_new_tokens: 8192
   num_return_sequences: 1

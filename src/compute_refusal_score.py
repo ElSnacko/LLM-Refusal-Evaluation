@@ -198,9 +198,11 @@ def load_config(config_path: str) -> Dict[str, Any]:
 
 
 class RefusalScorePipeline:
+    DEFAULT_DATASET_ID = "Iker/refusal-evaluation"
+
     def __init__(
         self,
-        dataset_splits: List[str],
+        dataset_splits: List[Any],  # List of str or Dict[str, str] with dataset_id and split
         answer_model_name: str,
         judge_model_name: str,
         output_dir: str,
@@ -223,7 +225,8 @@ class RefusalScorePipeline:
         judge_model_batch_size: int = 32,
         continue_from_checkpoint: bool = False,
     ) -> None:
-        self.dataset_splits = dataset_splits
+        # Normalize dataset_splits to list of dicts with dataset_id and split
+        self.dataset_splits = self._normalize_splits(dataset_splits)
         self.answer_model_name = answer_model_name
         self.judge_model_name = judge_model_name
         self.output_dir = output_dir
@@ -250,13 +253,54 @@ class RefusalScorePipeline:
         self._answer_generator: Optional[GenerateAnswers] = None
         self._judge_scorer: Optional[LLMJudge] = None
 
+    def _normalize_splits(self, splits: List[Any]) -> List[Dict[str, Optional[str]]]:
+        """
+        Normalize dataset_splits to a list of dicts with 'dataset_id', 'config', and 'split' keys.
+
+        Supports:
+        - Simple strings: "split_name" -> uses DEFAULT_DATASET_ID with that split
+        - Dict format: {"dataset_id": "org/dataset", "config": "config_name", "split": "split_name"}
+        - Dict without split: {"dataset_id": "org/dataset"} -> will auto-detect split
+        """
+        normalized = []
+        for item in splits:
+            if isinstance(item, str):
+                normalized.append({
+                    "dataset_id": self.DEFAULT_DATASET_ID,
+                    "config": None,
+                    "split": item,
+                    "prompt_column": "prompt",
+                })
+            elif isinstance(item, dict):
+                normalized.append({
+                    "dataset_id": item.get("dataset_id", self.DEFAULT_DATASET_ID),
+                    "config": item.get("config"),  # Can be None
+                    "split": item.get("split"),  # Can be None
+                    "prompt_column": item.get("prompt_column", "prompt"),
+                })
+            else:
+                raise ValueError(f"Invalid split format: {item}")
+        return normalized
+
+    def _get_split_dir_name(self, split_config: Dict[str, Optional[str]]) -> str:
+        """Get directory name for a split (uses dataset_id/config/split, sanitized)."""
+        parts = [split_config["dataset_id"]]
+        if split_config.get("config"):
+            parts.append(split_config["config"])
+        if split_config.get("split"):
+            parts.append(split_config["split"])
+        name = "_".join(parts)
+        return name.replace("/", "_").replace(":", "_")
+
     def _print_parameters(self) -> None:
         print(f"Computing refusal score for {self.answer_model_name}")
         print(">Parameters:")
         print(f"  - 📁 Output Dir: {self.output_dir}")
         print(f"  - ❓ Answer Model: {self.answer_model_name}")
         print(f"  - 🧑🏻‍⚖️ Judge Model: {self.judge_model_name}")
-        print(f"  - 📊 Dataset Splits: {self.dataset_splits}")
+        print(f"  - 📊 Dataset Splits:")
+        for split_config in self.dataset_splits:
+            print(f"      - {split_config['dataset_id']}:{split_config['split']}")
         print(f"  - 💻 GPU Memory Utilization: {self.gpu_memory_utilization}")
         print(f"  - 💻 Tensor Parallel Size: {self.tensor_parallel_size}")
         print(f"  - 💬 Thinking String: {self.thinking_string}")
@@ -282,8 +326,9 @@ class RefusalScorePipeline:
     def _ensure_output_dir(self) -> None:
         os.makedirs(self.output_dir, exist_ok=True)
         # Create subdirectories for each split
-        for split in self.dataset_splits:
-            os.makedirs(os.path.join(self.output_dir, split), exist_ok=True)
+        for split_config in self.dataset_splits:
+            split_dir = self._get_split_dir_name(split_config)
+            os.makedirs(os.path.join(self.output_dir, split_dir), exist_ok=True)
 
     def _get_answer_generator(self) -> GenerateAnswers:
         if self._answer_generator is None:
@@ -305,13 +350,42 @@ class RefusalScorePipeline:
             )
         return self._judge_scorer
 
-    def _load_split_dataset(self, split_name: str) -> List[Dict[str, Any]]:
+    def _load_split_dataset(self, split_config: Dict[str, Optional[str]]) -> List[Dict[str, Any]]:
         """Load a dataset split from HuggingFace hub."""
-        print(f"Loading dataset split: {split_name}")
-        dataset = load_dataset("Iker/refusal-evaluation", split=split_name)
-        # Convert to list of dicts
-        data = [dict(example) for example in dataset]
-        print(f"Loaded {len(data)} examples from split {split_name}")
+        dataset_id = split_config["dataset_id"]
+        config_name = split_config.get("config")
+        split_name = split_config.get("split")
+
+        # Build description for logging
+        desc_parts = [dataset_id]
+        if config_name:
+            desc_parts.append(f"config={config_name}")
+        if split_name:
+            desc_parts.append(f"split={split_name}")
+
+        if split_name:
+            print(f"Loading dataset: {' '.join(desc_parts)}")
+            dataset = load_dataset(dataset_id, name=config_name, split=split_name)
+        else:
+            print(f"Loading dataset: {' '.join(desc_parts)} (auto-detecting split)")
+            dataset_dict = load_dataset(dataset_id, name=config_name)
+            # Get available splits and use the first one (usually 'train')
+            available_splits = list(dataset_dict.keys())
+            if not available_splits:
+                raise ValueError(f"No splits found in dataset {dataset_id}")
+            split_name = available_splits[0]
+            print(f"  Using split: {split_name} (available: {available_splits})")
+            dataset = dataset_dict[split_name]
+
+        # Convert to list of dicts, normalizing prompt column name
+        prompt_column = split_config.get("prompt_column", "prompt")
+        data = []
+        for example in dataset:
+            row = dict(example)
+            if prompt_column != "prompt" and prompt_column in row:
+                row["prompt"] = row[prompt_column]
+            data.append(row)
+        print(f"Loaded {len(data)} examples from {dataset_id}")
         return data
 
     def step_generate_answers(self) -> None:
@@ -320,8 +394,9 @@ class RefusalScorePipeline:
 
         answer_generator: Optional[GenerateAnswers] = None
 
-        for split_name in self.dataset_splits:
-            split_dir = os.path.join(self.output_dir, split_name)
+        for split_config in self.dataset_splits:
+            split_dir_name = self._get_split_dir_name(split_config)
+            split_dir = os.path.join(self.output_dir, split_dir_name)
             answers_path = os.path.join(split_dir, "answers.json")
 
             if self.continue_from_checkpoint and os.path.exists(answers_path):
@@ -331,12 +406,12 @@ class RefusalScorePipeline:
             if answer_generator is None:
                 answer_generator = self._get_answer_generator()
 
-            dataset = self._load_split_dataset(split_name)
+            dataset = self._load_split_dataset(split_config)
             dataset_answers: List[Dict[str, Any]] = []
 
             for i in tqdm(
                 range(0, len(dataset), self.answer_model_batch_size),
-                desc=f"Computing answers for {split_name}",
+                desc=f"Computing answers for {split_config['split'] or split_config['dataset_id']}",
                 position=0,
                 leave=True,
             ):
@@ -368,8 +443,9 @@ class RefusalScorePipeline:
 
         judge_scorer: Optional[LLMJudge] = None
 
-        for split_name in self.dataset_splits:
-            split_dir = os.path.join(self.output_dir, split_name)
+        for split_config in self.dataset_splits:
+            split_dir_name = self._get_split_dir_name(split_config)
+            split_dir = os.path.join(self.output_dir, split_dir_name)
             answers_path = os.path.join(split_dir, "answers.json")
             judges_path = os.path.join(split_dir, "judge_scores.json")
 
@@ -409,7 +485,7 @@ class RefusalScorePipeline:
 
             for i in tqdm(
                 range(0, len(flat_pairs), self.judge_model_batch_size),
-                desc=f"Judging {split_name} answers",
+                desc=f"Judging {split_config['split'] or split_config['dataset_id']} answers",
                 position=0,
                 leave=True,
             ):
@@ -447,8 +523,9 @@ class RefusalScorePipeline:
         """Aggregate scores for each split independently."""
         print("Step 3: Aggregating scores with softmax weighting")
 
-        for split_name in self.dataset_splits:
-            split_dir = os.path.join(self.output_dir, split_name)
+        for split_config in self.dataset_splits:
+            split_dir_name = self._get_split_dir_name(split_config)
+            split_dir = os.path.join(self.output_dir, split_dir_name)
             answers_path = os.path.join(split_dir, "answers.json")
             judges_path = os.path.join(split_dir, "judge_scores.json")
             aggregated_path = os.path.join(split_dir, "censor_scores.json")
@@ -458,7 +535,7 @@ class RefusalScorePipeline:
                 continue
 
             if not os.path.exists(answers_path) or not os.path.exists(judges_path):
-                print(f"Missing files for {split_name}, skipping aggregation...")
+                print(f"Missing files for {split_config['split'] or split_config['dataset_id']}, skipping aggregation...")
                 continue
 
             compute_aggregates(
