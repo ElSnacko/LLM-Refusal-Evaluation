@@ -2,7 +2,7 @@ import argparse
 import json
 import os
 from collections import defaultdict
-from typing import Any, Dict, List, Optional, Tuple, cast
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union, cast
 
 import matplotlib.pyplot as plt
 import torch
@@ -10,8 +10,11 @@ import yaml
 from datasets import load_dataset
 from tqdm.auto import tqdm
 
-from src.answer_generator import GenerateAnswers
-from src.llm_judge import LLMJudge
+if TYPE_CHECKING:
+    from src.answer_generator import GenerateAnswers
+    from src.answer_generator_gguf import GenerateAnswersGGUF
+    from src.llm_judge import LLMJudge
+    from src.llm_judge_gguf import LLMJudgeGGUF
 
 
 def aggregate_with_softmax(
@@ -224,6 +227,10 @@ class RefusalScorePipeline:
         judge_top_k: int = 20,
         judge_model_batch_size: int = 32,
         continue_from_checkpoint: bool = False,
+        answer_backend: str = "vllm",
+        judge_backend: str = "vllm",
+        answer_n_gpu_layers: int = -1,
+        judge_n_gpu_layers: int = -1,
     ) -> None:
         # Normalize dataset_splits to list of dicts with dataset_id and split
         self.dataset_splits = self._normalize_splits(dataset_splits)
@@ -249,9 +256,13 @@ class RefusalScorePipeline:
         self.judge_top_k = judge_top_k
         self.judge_model_batch_size = judge_model_batch_size
         self.continue_from_checkpoint = continue_from_checkpoint
+        self.answer_backend = answer_backend
+        self.judge_backend = judge_backend
+        self.answer_n_gpu_layers = answer_n_gpu_layers
+        self.judge_n_gpu_layers = judge_n_gpu_layers
         # Lazy-initialized components
-        self._answer_generator: Optional[GenerateAnswers] = None
-        self._judge_scorer: Optional[LLMJudge] = None
+        self._answer_generator: Optional[Any] = None
+        self._judge_scorer: Optional[Any] = None
 
     def _normalize_splits(self, splits: List[Any]) -> List[Dict[str, Optional[str]]]:
         """
@@ -321,6 +332,12 @@ class RefusalScorePipeline:
         print(f"  - 🧑🏻‍⚖️ Judge Top K: {self.judge_top_k}")
         print(f"  - 🧑🏻‍⚖️ Judge Model Batch Size: {self.judge_model_batch_size}")
         print(f"  - 🔄 Continue from Checkpoint: {self.continue_from_checkpoint}")
+        print(f"  - ❓ Answer Backend: {self.answer_backend}")
+        print(f"  - 🧑🏻‍⚖️ Judge Backend: {self.judge_backend}")
+        if self.answer_backend == "gguf":
+            print(f"  - ❓ Answer n_gpu_layers: {self.answer_n_gpu_layers}")
+        if self.judge_backend == "gguf":
+            print(f"  - 🧑🏻‍⚖️ Judge n_gpu_layers: {self.judge_n_gpu_layers}")
         print("-" * 50, end="\n\n")
 
     def _ensure_output_dir(self) -> None:
@@ -330,24 +347,46 @@ class RefusalScorePipeline:
             split_dir = self._get_split_dir_name(split_config)
             os.makedirs(os.path.join(self.output_dir, split_dir), exist_ok=True)
 
-    def _get_answer_generator(self) -> GenerateAnswers:
+    def _get_answer_generator(self) -> Any:
         if self._answer_generator is None:
-            self._answer_generator = GenerateAnswers(
-                model_name=self.answer_model_name,
-                max_model_len=self.answer_model_max_len,
-                gpu_memory_utilization=self.gpu_memory_utilization,
-                tensor_parallel_size=self.tensor_parallel_size,
-            )
+            if self.answer_backend == "gguf":
+                from src.answer_generator_gguf import GenerateAnswersGGUF
+
+                self._answer_generator = GenerateAnswersGGUF(
+                    model_path=self.answer_model_name,
+                    max_model_len=self.answer_model_max_len,
+                    n_gpu_layers=self.answer_n_gpu_layers,
+                )
+            else:
+                from src.answer_generator import GenerateAnswers
+
+                self._answer_generator = GenerateAnswers(
+                    model_name=self.answer_model_name,
+                    max_model_len=self.answer_model_max_len,
+                    gpu_memory_utilization=self.gpu_memory_utilization,
+                    tensor_parallel_size=self.tensor_parallel_size,
+                )
         return self._answer_generator
 
-    def _get_judge_scorer(self) -> LLMJudge:
+    def _get_judge_scorer(self) -> Any:
         if self._judge_scorer is None:
-            self._judge_scorer = LLMJudge(
-                model_name=self.judge_model_name,
-                max_model_len=self.judge_model_max_len,
-                gpu_memory_utilization=self.gpu_memory_utilization,
-                tensor_parallel_size=self.tensor_parallel_size,
-            )
+            if self.judge_backend == "gguf":
+                from src.llm_judge_gguf import LLMJudgeGGUF
+
+                self._judge_scorer = LLMJudgeGGUF(
+                    model_path=self.judge_model_name,
+                    max_model_len=self.judge_model_max_len,
+                    n_gpu_layers=self.judge_n_gpu_layers,
+                )
+            else:
+                from src.llm_judge import LLMJudge
+
+                self._judge_scorer = LLMJudge(
+                    model_name=self.judge_model_name,
+                    max_model_len=self.judge_model_max_len,
+                    gpu_memory_utilization=self.gpu_memory_utilization,
+                    tensor_parallel_size=self.tensor_parallel_size,
+                )
         return self._judge_scorer
 
     def _load_split_dataset(self, split_config: Dict[str, Optional[str]]) -> List[Dict[str, Any]]:
@@ -392,7 +431,7 @@ class RefusalScorePipeline:
         """Generate answers for all splits."""
         print("Step 1: Generating answers for all splits")
 
-        answer_generator: Optional[GenerateAnswers] = None
+        answer_generator: Optional[Any] = None
 
         for split_config in self.dataset_splits:
             split_dir_name = self._get_split_dir_name(split_config)
@@ -441,7 +480,7 @@ class RefusalScorePipeline:
         """Compute judge scores for all splits."""
         print("Step 2: Computing judge scores for all splits")
 
-        judge_scorer: Optional[LLMJudge] = None
+        judge_scorer: Optional[Any] = None
 
         for split_config in self.dataset_splits:
             split_dir_name = self._get_split_dir_name(split_config)
@@ -571,6 +610,10 @@ def build_pipeline_from_config(config: Dict[str, Any]) -> RefusalScorePipeline:
     answer_top_p = model_config.get("top_p")
     answer_top_k = model_config.get("top_k")
 
+    # Backend selection: "vllm" (default) or "gguf"
+    answer_backend = model_config.get("backend", "vllm")
+    judge_backend = judge_config.get("backend", "vllm")
+
     return RefusalScorePipeline(
         dataset_splits=config.get("dataset_splits", []),
         answer_model_name=model_config["name_or_path"],
@@ -595,6 +638,10 @@ def build_pipeline_from_config(config: Dict[str, Any]) -> RefusalScorePipeline:
         judge_top_k=judge_config.get("top_k", 20),
         judge_model_batch_size=judge_config.get("batch_size", 32),
         continue_from_checkpoint=config.get("continue_from_checkpoint", False),
+        answer_backend=answer_backend,
+        judge_backend=judge_backend,
+        answer_n_gpu_layers=model_config.get("n_gpu_layers", -1),
+        judge_n_gpu_layers=judge_config.get("n_gpu_layers", -1),
     )
 
 

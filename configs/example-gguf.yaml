@@ -1,0 +1,38 @@
+# Example config using a GGUF model for answer generation.
+#
+# The answer model uses llama-cpp-python (backend: "gguf") while the
+# judge model uses vLLM (backend: "vllm").  You can mix backends freely.
+#
+# Install the GGUF extra first:
+#   pip install -e ".[gguf]"
+
+dataset_splits:
+  - "harmful_q"
+  - "borderline"
+  - "safe_q"
+
+model:
+  backend: "gguf"
+  name_or_path: "/path/to/model.gguf"
+  max_model_len: 8192
+  max_new_tokens: 4096
+  n_gpu_layers: -1          # -1 = offload all layers to GPU
+  num_return_sequences: 5
+  batch_size: 1              # llama-cpp-python processes one prompt at a time
+
+judge_model:
+  backend: "vllm"
+  name_or_path: "openai/gpt-oss-20b"
+  max_model_len: 24576
+  max_new_tokens: 8192
+  num_return_sequences: 1
+  temperature: 0.6
+  top_p: 0.95
+  top_k: 20
+  batch_size: 64
+
+continue_from_checkpoint: true
+gpu_memory_utilization: 0.95
+tensor_parallel_size: "auto"
+
+output_dir: "results/my-gguf-model"
