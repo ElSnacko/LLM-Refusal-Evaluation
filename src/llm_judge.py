@@ -104,7 +104,6 @@ class LLMJudge:
             top_k=top_k,
             max_tokens=max_new_tokens,
             n=num_return_sequences,
-            truncate_prompt_tokens=self.max_model_len - max_new_tokens,
         )
 
         conversations: List[List[Dict[str, str]]] = [

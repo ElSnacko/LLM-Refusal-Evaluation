@@ -12,9 +12,7 @@ from tqdm.auto import tqdm
 
 if TYPE_CHECKING:
     from src.answer_generator import GenerateAnswers
-    from src.answer_generator_gguf import GenerateAnswersGGUF
     from src.llm_judge import LLMJudge
-    from src.llm_judge_gguf import LLMJudgeGGUF
 
 
 def aggregate_with_softmax(
@@ -201,11 +199,9 @@ def load_config(config_path: str) -> Dict[str, Any]:
 
 
 class RefusalScorePipeline:
-    DEFAULT_DATASET_ID = "Iker/refusal-evaluation"
-
     def __init__(
         self,
-        dataset_splits: List[Any],  # List of str or Dict[str, str] with dataset_id and split
+        dataset_splits: List[Dict[str, Any]],
         answer_model_name: str,
         judge_model_name: str,
         output_dir: str,
@@ -219,6 +215,7 @@ class RefusalScorePipeline:
         answer_top_p: Optional[float] = None,
         answer_top_k: Optional[int] = None,
         answer_model_batch_size: int = 32,
+        enforce_eager: bool = False,
         judge_model_max_len: int = 16384,
         judge_max_tokens: int = 8192,
         judge_num_return_sequences: int = 1,
@@ -227,13 +224,8 @@ class RefusalScorePipeline:
         judge_top_k: int = 20,
         judge_model_batch_size: int = 32,
         continue_from_checkpoint: bool = False,
-        answer_backend: str = "vllm",
-        judge_backend: str = "vllm",
-        answer_n_gpu_layers: int = -1,
-        judge_n_gpu_layers: int = -1,
     ) -> None:
-        # Normalize dataset_splits to list of dicts with dataset_id and split
-        self.dataset_splits = self._normalize_splits(dataset_splits)
+        self.dataset_splits = dataset_splits
         self.answer_model_name = answer_model_name
         self.judge_model_name = judge_model_name
         self.output_dir = output_dir
@@ -248,6 +240,7 @@ class RefusalScorePipeline:
         self.answer_top_p = answer_top_p
         self.answer_top_k = answer_top_k
         self.answer_model_batch_size = answer_model_batch_size
+        self.enforce_eager = enforce_eager
         self.judge_model_max_len = judge_model_max_len
         self.judge_max_tokens = judge_max_tokens
         self.judge_num_return_sequences = judge_num_return_sequences
@@ -256,52 +249,9 @@ class RefusalScorePipeline:
         self.judge_top_k = judge_top_k
         self.judge_model_batch_size = judge_model_batch_size
         self.continue_from_checkpoint = continue_from_checkpoint
-        self.answer_backend = answer_backend
-        self.judge_backend = judge_backend
-        self.answer_n_gpu_layers = answer_n_gpu_layers
-        self.judge_n_gpu_layers = judge_n_gpu_layers
         # Lazy-initialized components
         self._answer_generator: Optional[Any] = None
         self._judge_scorer: Optional[Any] = None
-
-    def _normalize_splits(self, splits: List[Any]) -> List[Dict[str, Optional[str]]]:
-        """
-        Normalize dataset_splits to a list of dicts with 'dataset_id', 'config', and 'split' keys.
-
-        Supports:
-        - Simple strings: "split_name" -> uses DEFAULT_DATASET_ID with that split
-        - Dict format: {"dataset_id": "org/dataset", "config": "config_name", "split": "split_name"}
-        - Dict without split: {"dataset_id": "org/dataset"} -> will auto-detect split
-        """
-        normalized = []
-        for item in splits:
-            if isinstance(item, str):
-                normalized.append({
-                    "dataset_id": self.DEFAULT_DATASET_ID,
-                    "config": None,
-                    "split": item,
-                    "prompt_column": "prompt",
-                })
-            elif isinstance(item, dict):
-                normalized.append({
-                    "dataset_id": item.get("dataset_id", self.DEFAULT_DATASET_ID),
-                    "config": item.get("config"),  # Can be None
-                    "split": item.get("split"),  # Can be None
-                    "prompt_column": item.get("prompt_column", "prompt"),
-                })
-            else:
-                raise ValueError(f"Invalid split format: {item}")
-        return normalized
-
-    def _get_split_dir_name(self, split_config: Dict[str, Optional[str]]) -> str:
-        """Get directory name for a split (uses dataset_id/config/split, sanitized)."""
-        parts = [split_config["dataset_id"]]
-        if split_config.get("config"):
-            parts.append(split_config["config"])
-        if split_config.get("split"):
-            parts.append(split_config["split"])
-        name = "_".join(parts)
-        return name.replace("/", "_").replace(":", "_")
 
     def _print_parameters(self) -> None:
         print(f"Computing refusal score for {self.answer_model_name}")
@@ -309,9 +259,7 @@ class RefusalScorePipeline:
         print(f"  - 📁 Output Dir: {self.output_dir}")
         print(f"  - ❓ Answer Model: {self.answer_model_name}")
         print(f"  - 🧑🏻‍⚖️ Judge Model: {self.judge_model_name}")
-        print(f"  - 📊 Dataset Splits:")
-        for split_config in self.dataset_splits:
-            print(f"      - {split_config['dataset_id']}:{split_config['split']}")
+        print(f"  - 📊 Dataset Splits: {self.dataset_splits}")
         print(f"  - 💻 GPU Memory Utilization: {self.gpu_memory_utilization}")
         print(f"  - 💻 Tensor Parallel Size: {self.tensor_parallel_size}")
         print(f"  - 💬 Thinking String: {self.thinking_string}")
@@ -332,99 +280,74 @@ class RefusalScorePipeline:
         print(f"  - 🧑🏻‍⚖️ Judge Top K: {self.judge_top_k}")
         print(f"  - 🧑🏻‍⚖️ Judge Model Batch Size: {self.judge_model_batch_size}")
         print(f"  - 🔄 Continue from Checkpoint: {self.continue_from_checkpoint}")
-        print(f"  - ❓ Answer Backend: {self.answer_backend}")
-        print(f"  - 🧑🏻‍⚖️ Judge Backend: {self.judge_backend}")
-        if self.answer_backend == "gguf":
-            print(f"  - ❓ Answer n_gpu_layers: {self.answer_n_gpu_layers}")
-        if self.judge_backend == "gguf":
-            print(f"  - 🧑🏻‍⚖️ Judge n_gpu_layers: {self.judge_n_gpu_layers}")
         print("-" * 50, end="\n\n")
 
     def _ensure_output_dir(self) -> None:
         os.makedirs(self.output_dir, exist_ok=True)
         # Create subdirectories for each split
-        for split_config in self.dataset_splits:
-            split_dir = self._get_split_dir_name(split_config)
-            os.makedirs(os.path.join(self.output_dir, split_dir), exist_ok=True)
+        for split in self.dataset_splits:
+            os.makedirs(os.path.join(self.output_dir, split["name"]), exist_ok=True)
 
     def _get_answer_generator(self) -> Any:
         if self._answer_generator is None:
-            if self.answer_backend == "gguf":
-                from src.answer_generator_gguf import GenerateAnswersGGUF
+            from src.answer_generator import GenerateAnswers
 
-                self._answer_generator = GenerateAnswersGGUF(
-                    model_path=self.answer_model_name,
-                    max_model_len=self.answer_model_max_len,
-                    n_gpu_layers=self.answer_n_gpu_layers,
-                )
-            else:
-                from src.answer_generator import GenerateAnswers
-
-                self._answer_generator = GenerateAnswers(
-                    model_name=self.answer_model_name,
-                    max_model_len=self.answer_model_max_len,
-                    gpu_memory_utilization=self.gpu_memory_utilization,
-                    tensor_parallel_size=self.tensor_parallel_size,
-                )
+            self._answer_generator = GenerateAnswers(
+                model_name=self.answer_model_name,
+                max_model_len=self.answer_model_max_len,
+                gpu_memory_utilization=self.gpu_memory_utilization,
+                tensor_parallel_size=self.tensor_parallel_size,
+                enforce_eager=self.enforce_eager,
+            )
         return self._answer_generator
 
     def _get_judge_scorer(self) -> Any:
         if self._judge_scorer is None:
-            if self.judge_backend == "gguf":
-                from src.llm_judge_gguf import LLMJudgeGGUF
+            from src.llm_judge import LLMJudge
 
-                self._judge_scorer = LLMJudgeGGUF(
-                    model_path=self.judge_model_name,
-                    max_model_len=self.judge_model_max_len,
-                    n_gpu_layers=self.judge_n_gpu_layers,
-                )
-            else:
-                from src.llm_judge import LLMJudge
-
-                self._judge_scorer = LLMJudge(
-                    model_name=self.judge_model_name,
-                    max_model_len=self.judge_model_max_len,
-                    gpu_memory_utilization=self.gpu_memory_utilization,
-                    tensor_parallel_size=self.tensor_parallel_size,
-                )
+            self._judge_scorer = LLMJudge(
+                model_name=self.judge_model_name,
+                max_model_len=self.judge_model_max_len,
+                gpu_memory_utilization=self.gpu_memory_utilization,
+                tensor_parallel_size=self.tensor_parallel_size,
+            )
         return self._judge_scorer
 
-    def _load_split_dataset(self, split_config: Dict[str, Optional[str]]) -> List[Dict[str, Any]]:
-        """Load a dataset split from HuggingFace hub."""
-        dataset_id = split_config["dataset_id"]
-        config_name = split_config.get("config")
-        split_name = split_config.get("split")
+    def _load_split_dataset(self, split_spec: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Load a dataset split from HuggingFace hub.
 
-        # Build description for logging
-        desc_parts = [dataset_id]
-        if config_name:
-            desc_parts.append(f"config={config_name}")
-        if split_name:
-            desc_parts.append(f"split={split_name}")
+        Args:
+            split_spec: Normalized split dict with keys: name, dataset_id,
+                        config, split, prompt_column.
+        """
+        dataset_id = split_spec["dataset_id"]
+        config_name = split_spec.get("config")
+        split = split_spec.get("split")
+        prompt_column = split_spec.get("prompt_column", "prompt")
 
-        if split_name:
-            print(f"Loading dataset: {' '.join(desc_parts)}")
-            dataset = load_dataset(dataset_id, name=config_name, split=split_name)
-        else:
-            print(f"Loading dataset: {' '.join(desc_parts)} (auto-detecting split)")
-            dataset_dict = load_dataset(dataset_id, name=config_name)
-            # Get available splits and use the first one (usually 'train')
-            available_splits = list(dataset_dict.keys())
-            if not available_splits:
-                raise ValueError(f"No splits found in dataset {dataset_id}")
-            split_name = available_splits[0]
-            print(f"  Using split: {split_name} (available: {available_splits})")
-            dataset = dataset_dict[split_name]
+        print(f"Loading dataset: {dataset_id} (config={config_name}, split={split})")
+        kwargs: Dict[str, Any] = {}
+        if config_name is not None:
+            kwargs["name"] = config_name
+        if split is not None:
+            kwargs["split"] = split
+        dataset = load_dataset(dataset_id, **kwargs)
 
-        # Convert to list of dicts, normalizing prompt column name
-        prompt_column = split_config.get("prompt_column", "prompt")
-        data = []
+        # If no split was specified, load_dataset returns a DatasetDict;
+        # use the first available split.
+        if hasattr(dataset, "keys"):
+            first_key = next(iter(dataset.keys()))
+            print(f"  No split specified, using first available: {first_key}")
+            dataset = dataset[first_key]
+
+        # Convert to list of dicts and normalize the prompt column
+        data: List[Dict[str, Any]] = []
         for example in dataset:
             row = dict(example)
             if prompt_column != "prompt" and prompt_column in row:
                 row["prompt"] = row[prompt_column]
             data.append(row)
-        print(f"Loaded {len(data)} examples from {dataset_id}")
+        print(f"Loaded {len(data)} examples from {split_spec['name']}")
         return data
 
     def step_generate_answers(self) -> None:
@@ -433,9 +356,8 @@ class RefusalScorePipeline:
 
         answer_generator: Optional[Any] = None
 
-        for split_config in self.dataset_splits:
-            split_dir_name = self._get_split_dir_name(split_config)
-            split_dir = os.path.join(self.output_dir, split_dir_name)
+        for split_spec in self.dataset_splits:
+            split_dir = os.path.join(self.output_dir, split_spec["name"])
             answers_path = os.path.join(split_dir, "answers.json")
 
             if self.continue_from_checkpoint and os.path.exists(answers_path):
@@ -445,12 +367,12 @@ class RefusalScorePipeline:
             if answer_generator is None:
                 answer_generator = self._get_answer_generator()
 
-            dataset = self._load_split_dataset(split_config)
+            dataset = self._load_split_dataset(split_spec)
             dataset_answers: List[Dict[str, Any]] = []
 
             for i in tqdm(
                 range(0, len(dataset), self.answer_model_batch_size),
-                desc=f"Computing answers for {split_config['split'] or split_config['dataset_id']}",
+                desc=f"Computing answers for {split_spec['name']}",
                 position=0,
                 leave=True,
             ):
@@ -482,9 +404,8 @@ class RefusalScorePipeline:
 
         judge_scorer: Optional[Any] = None
 
-        for split_config in self.dataset_splits:
-            split_dir_name = self._get_split_dir_name(split_config)
-            split_dir = os.path.join(self.output_dir, split_dir_name)
+        for split_spec in self.dataset_splits:
+            split_dir = os.path.join(self.output_dir, split_spec["name"])
             answers_path = os.path.join(split_dir, "answers.json")
             judges_path = os.path.join(split_dir, "judge_scores.json")
 
@@ -524,7 +445,7 @@ class RefusalScorePipeline:
 
             for i in tqdm(
                 range(0, len(flat_pairs), self.judge_model_batch_size),
-                desc=f"Judging {split_config['split'] or split_config['dataset_id']} answers",
+                desc=f"Judging {split_spec['name']} answers",
                 position=0,
                 leave=True,
             ):
@@ -562,9 +483,8 @@ class RefusalScorePipeline:
         """Aggregate scores for each split independently."""
         print("Step 3: Aggregating scores with softmax weighting")
 
-        for split_config in self.dataset_splits:
-            split_dir_name = self._get_split_dir_name(split_config)
-            split_dir = os.path.join(self.output_dir, split_dir_name)
+        for split_spec in self.dataset_splits:
+            split_dir = os.path.join(self.output_dir, split_spec["name"])
             answers_path = os.path.join(split_dir, "answers.json")
             judges_path = os.path.join(split_dir, "judge_scores.json")
             aggregated_path = os.path.join(split_dir, "censor_scores.json")
@@ -574,7 +494,7 @@ class RefusalScorePipeline:
                 continue
 
             if not os.path.exists(answers_path) or not os.path.exists(judges_path):
-                print(f"Missing files for {split_config['split'] or split_config['dataset_id']}, skipping aggregation...")
+                print(f"Missing files for {split_spec['name']}, skipping aggregation...")
                 continue
 
             compute_aggregates(
@@ -591,6 +511,44 @@ class RefusalScorePipeline:
         self.step_generate_answers()
         self.step_judge_scores()
         self.step_aggregate()
+
+
+def _normalize_dataset_splits(raw_splits: List[Any]) -> List[Dict[str, Any]]:
+    """Normalize dataset_splits entries into a consistent dict format.
+
+    Accepts both simple string entries (e.g. "general_prompts") and dict
+    entries with keys like dataset_id, config, split, prompt_column.
+    """
+    normalized: List[Dict[str, Any]] = []
+    for entry in raw_splits:
+        if isinstance(entry, str):
+            normalized.append(
+                {
+                    "name": entry,
+                    "dataset_id": "Iker/refusal-evaluation",
+                    "config": None,
+                    "split": entry,
+                    "prompt_column": "prompt",
+                }
+            )
+        elif isinstance(entry, dict):
+            dataset_id = entry.get("dataset_id", "Iker/refusal-evaluation")
+            config_name = entry.get("config")
+            split = entry.get("split")
+            prompt_column = entry.get("prompt_column", "prompt")
+            name = split or config_name or dataset_id.replace("/", "_")
+            normalized.append(
+                {
+                    "name": name,
+                    "dataset_id": dataset_id,
+                    "config": config_name,
+                    "split": split,
+                    "prompt_column": prompt_column,
+                }
+            )
+        else:
+            raise ValueError(f"Unsupported dataset_splits entry: {type(entry)}")
+    return normalized
 
 
 def build_pipeline_from_config(config: Dict[str, Any]) -> RefusalScorePipeline:
@@ -610,12 +568,10 @@ def build_pipeline_from_config(config: Dict[str, Any]) -> RefusalScorePipeline:
     answer_top_p = model_config.get("top_p")
     answer_top_k = model_config.get("top_k")
 
-    # Backend selection: "vllm" (default) or "gguf"
-    answer_backend = model_config.get("backend", "vllm")
-    judge_backend = judge_config.get("backend", "vllm")
+    dataset_splits = _normalize_dataset_splits(config.get("dataset_splits", []))
 
     return RefusalScorePipeline(
-        dataset_splits=config.get("dataset_splits", []),
+        dataset_splits=dataset_splits,
         answer_model_name=model_config["name_or_path"],
         judge_model_name=judge_config.get("name_or_path", "openai/gpt-oss-20b"),
         output_dir=config["output_dir"],
@@ -630,6 +586,7 @@ def build_pipeline_from_config(config: Dict[str, Any]) -> RefusalScorePipeline:
         answer_top_p=answer_top_p,
         answer_top_k=answer_top_k,
         answer_model_batch_size=model_config.get("batch_size", 32),
+        enforce_eager=config.get("enforce_eager", False),
         judge_model_max_len=judge_config.get("max_model_len", 24576),
         judge_max_tokens=judge_config.get("max_new_tokens", 8192),
         judge_num_return_sequences=judge_config.get("num_return_sequences", 1),
@@ -638,10 +595,6 @@ def build_pipeline_from_config(config: Dict[str, Any]) -> RefusalScorePipeline:
         judge_top_k=judge_config.get("top_k", 20),
         judge_model_batch_size=judge_config.get("batch_size", 32),
         continue_from_checkpoint=config.get("continue_from_checkpoint", False),
-        answer_backend=answer_backend,
-        judge_backend=judge_backend,
-        answer_n_gpu_layers=model_config.get("n_gpu_layers", -1),
-        judge_n_gpu_layers=judge_config.get("n_gpu_layers", -1),
     )
 
 

@@ -11,6 +11,13 @@ dependencies = [
     "vllm>=0.16.0",
 ]
 
+# Override vllm's transformers<5 constraint to get qwen3_5 model support
+[tool.uv]
+constraint-dependencies = []
+override-dependencies = [
+    "transformers>=5.2.0",
+]
+
 [dependency-groups]
 dev = [
     "ruff>=0.15.4",
