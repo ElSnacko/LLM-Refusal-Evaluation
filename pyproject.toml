@@ -17,6 +17,16 @@ constraint-dependencies = []
 override-dependencies = [
     "transformers>=5.2.0",
 ]
+extra-index-url = ["https://wheels.vllm.ai/nightly"]
+prerelease = "if-necessary-or-explicit"
+
+[[tool.uv.index]]
+name = "vllm-nightly"
+url = "https://wheels.vllm.ai/nightly"
+explicit = true
+
+[tool.uv.sources]
+vllm = { index = "vllm-nightly" }
 
 [dependency-groups]
 dev = [
