@@ -163,4 +163,5 @@ class LLMJudge:
         """
         Delete the LLM instance and free the GPU memory.
         """
-        delete_llm(self.llm)
+        if hasattr(self, "llm"):
+            delete_llm(self.llm)
