@@ -570,6 +570,20 @@ class RefusalScorePipeline:
             data.append(row)
         print(f"Loaded {len(data)} examples from {split_spec['name']}")
 
+        # Deduplicate by prompt_hash
+        seen_hashes: set = set()
+        deduped: List[Dict[str, Any]] = []
+        for row in data:
+            h = row.get("prompt_hash", "")
+            if h in seen_hashes:
+                continue
+            seen_hashes.add(h)
+            deduped.append(row)
+        if len(deduped) < len(data):
+            print(f"  Deduplicated: {len(data)} -> {len(deduped)} "
+                  f"({len(data) - len(deduped)} duplicate prompts removed)")
+            data = deduped
+
         # Feature 2: balanced sampling per category
         if self._samples_per_category is not None:
             data = self._balanced_sample(data, self._samples_per_category, self._sampling_seed)
