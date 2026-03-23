@@ -1,0 +1,37 @@
+dataset_splits:
+  - name: "beavertails"
+    dataset_id: "PKU-Alignment/BeaverTails-Evaluation"
+    split: "test"
+    prompt_column: "prompt"
+    category_column: "auto"
+  - name: "general_prompts"
+    dataset_id: "Iker/refusal-evaluation"
+    split: "general_prompts"
+
+model:
+  name_or_path: "/mnt/bignvme/ai-stack/ai-backends/models/huggingface/Qwen/Qwen3.5-9B"
+  max_model_len: 4096
+  max_new_tokens: 512
+  thinking-string: "</think>"
+  num_return_sequences: 2
+  temperature: 0.6
+  top_p: 0.95
+  top_k: 20
+  batch_size: 32
+
+judge_model:
+  name_or_path: "/mnt/bignvme/ai-stack/ai-backends/models/huggingface/unsloth/gpt-oss-20b"
+  max_model_len: 24576
+  max_new_tokens: 8192
+  num_return_sequences: 1
+  temperature: 0.6
+  top_p: 0.95
+  top_k: 20
+  batch_size: 64
+
+continue_from_checkpoint: false
+enforce_eager: true
+gpu_memory_utilization: 0.80
+tensor_parallel_size: "auto"
+
+output_dir: "results/test-combined-sample"
