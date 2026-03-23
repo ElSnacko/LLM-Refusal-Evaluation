@@ -202,8 +202,8 @@ output_dir: "results/my-model-evaluation"
 | `dataset_splits` | List of benchmark datasets (strings or dicts) |
 | `dataset_splits[].dataset_id` | HuggingFace dataset identifier |
 | `dataset_splits[].name` | Custom output directory name for this split |
-| `dataset_splits[].prompt_column` | Column name for prompts (auto-detected for known datasets) |
-| `dataset_splits[].category_column` | Column for categories. Use `"auto"` for boolean column auto-detection (e.g., BeaverTails) |
+| `dataset_splits[].prompt_column` | Column name for prompts. If omitted, auto-detected via common aliases (`prompt`, `Goal`, `question`, `instruction`, `input`, `text`, `query`) with case-insensitive fallback |
+| `dataset_splits[].category_column` | Column for categories. Use `"auto"` to auto-detect: tries nested bool dicts, top-level bool columns, then common string column aliases (`category`, `Category`, `label`, `topic`, `type`) |
 | `model.name_or_path` | HuggingFace model ID or local path |
 | `model.thinking-string` | Token that separates reasoning from answer (e.g., `"</think>"`) |
 | `model.num_return_sequences` | Number of answer samples per prompt (default: 5) |
@@ -232,13 +232,20 @@ python src/compute_refusal_score.py --config configs/my-model.yaml [OPTIONS]
 
 ### Dataset Adapters
 
-Built-in adapters auto-detect column mappings for known datasets. These apply only when `prompt_column` or `category_column` is not explicitly set:
+Built-in adapters provide column mappings for known datasets. These apply only when `prompt_column` or `category_column` is not explicitly set in the config:
 
-| Dataset | prompt_column | category_column |
-|---------|---------------|-----------------|
-| `PKU-Alignment/BeaverTails*` | `prompt` | `auto` (boolean columns) |
-| `allenai/wildjailbreak` | `vanilla` | `risk_category` |
-| `sorry-bench/*` | `prompt` | `category` |
+| Dataset | prompt_column | category_column | Category Layout |
+|---------|---------------|-----------------|-----------------|
+| `PKU-Alignment/BeaverTails` | `prompt` | `auto` | Nested dict of bools: `category: {name: true}` |
+| `PKU-Alignment/BeaverTails-Evaluation` | `prompt` | `auto` | String column: `category: "animal_abuse"` |
+| `allenai/wildjailbreak` | `vanilla` | `risk_category` | String |
+| `sorry-bench/*` | `prompt` | `category` | String |
+| `JailbreakBench/JBB-Behaviors` | `Goal` (auto) | `Category` (auto) | String |
+| Any unknown dataset | Auto-discovered | Auto-discovered | Auto-detected |
+
+For unknown datasets, the loader auto-discovers columns by trying common aliases with case-insensitive matching. If auto-detection fails, it raises an error listing available columns.
+
+Duplicate prompts are automatically removed by `prompt_hash` after loading.
 
 ### Merge Utility
 
