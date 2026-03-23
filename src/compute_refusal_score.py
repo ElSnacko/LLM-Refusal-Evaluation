@@ -422,8 +422,27 @@ class RefusalScorePipeline:
             )
         return self._judge_scorer
 
+    # Common prompt column names across HF safety/eval datasets (case-insensitive lookup)
+    _PROMPT_COLUMN_ALIASES = [
+        "prompt", "question", "Goal", "goal", "instruction", "input", "text",
+        "query", "content", "message", "vanilla",
+    ]
+    # Common category column names (case-insensitive lookup)
+    _CATEGORY_COLUMN_ALIASES = [
+        "category", "Category", "label", "labels", "topic", "type",
+        "risk_category", "harm_category", "subject",
+    ]
+
     def _load_split_dataset(self, split_spec: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Load a dataset split from HuggingFace hub.
+
+        Robust loader that handles arbitrary HuggingFace datasets:
+        - Auto-discovers prompt column if not specified (tries common aliases)
+        - Auto-discovers category column if set to "auto"
+        - Handles multi-label boolean categories (top-level or nested dict)
+        - Handles string/ClassLabel categories
+        - Deduplicates by prompt hash
+        - Validates data before returning
 
         Args:
             split_spec: Normalized split dict with keys: name, dataset_id,
@@ -447,55 +466,109 @@ class RefusalScorePipeline:
                 category_column = adapter["category_column"]
                 print(f"  Adapter: using category_column='{category_column}' for {dataset_id}")
 
-        # Apply default after adapter
-        if prompt_column is None:
-            prompt_column = "prompt"
-
         print(f"Loading dataset: {dataset_id} (config={config_name}, split={split})")
         kwargs: Dict[str, Any] = {}
         if config_name is not None:
             kwargs["name"] = config_name
         if split is not None:
             kwargs["split"] = split
-        dataset = load_dataset(dataset_id, **kwargs)
+
+        try:
+            dataset = load_dataset(dataset_id, **kwargs)
+        except ValueError as e:
+            # Handle invalid split names — list available splits in the error
+            if "Unknown split" in str(e):
+                print(f"  [ERROR] {e}")
+                print(f"  Hint: check available splits for this dataset on HuggingFace")
+                raise
+            raise
 
         # If no split was specified, load_dataset returns a DatasetDict;
         # use the first available split.
         if hasattr(dataset, "keys"):
-            first_key = next(iter(dataset.keys()))
-            print(f"  No split specified, using first available: {first_key}")
+            available_splits = list(dataset.keys())
+            first_key = available_splits[0]
+            print(f"  No split specified, using '{first_key}' from {available_splits}")
             dataset = dataset[first_key]
 
-        # Detect boolean category columns for multi-label datasets (e.g. BeaverTails)
-        # when category_column is "auto". Handles two dataset layouts:
-        #   - BeaverTails-Evaluation: top-level bool columns (animal_abuse: True, ...)
-        #   - BeaverTails (full): nested dict column (category: {animal_abuse: True, ...})
+        if len(dataset) == 0:
+            print(f"  [WARN] Dataset is empty (0 rows)")
+            return []
+
+        # --- Resolve prompt column ---
+        available_columns = list(dataset.features.keys()) if hasattr(dataset, "features") else []
+        if prompt_column is None:
+            # Auto-discover: try common aliases
+            for alias in self._PROMPT_COLUMN_ALIASES:
+                if alias in available_columns:
+                    prompt_column = alias
+                    break
+            if prompt_column is None:
+                # Last resort: find the first string column with substantial text
+                if len(dataset) > 0:
+                    row0 = dataset[0]
+                    for col in available_columns:
+                        val = row0.get(col)
+                        if isinstance(val, str) and len(val) > 20:
+                            prompt_column = col
+                            break
+            if prompt_column is None:
+                raise ValueError(
+                    f"Could not auto-detect prompt column in {dataset_id}. "
+                    f"Available columns: {available_columns}. "
+                    f"Set --prompt-column or prompt_column in config."
+                )
+            print(f"  Auto-detected prompt_column='{prompt_column}'")
+        elif prompt_column not in available_columns:
+            # Case-insensitive fallback
+            col_lower = {c.lower(): c for c in available_columns}
+            if prompt_column.lower() in col_lower:
+                actual = col_lower[prompt_column.lower()]
+                print(f"  [INFO] prompt_column '{prompt_column}' -> '{actual}' (case mismatch)")
+                prompt_column = actual
+            else:
+                raise ValueError(
+                    f"prompt_column='{prompt_column}' not found in {dataset_id}. "
+                    f"Available columns: {available_columns}"
+                )
+
+        # --- Resolve category column ---
+        # When category_column is "auto", try: nested bool dict > top-level bools > string column
         _NON_CATEGORY_BOOLS = {"is_safe", "is_harmful", "is_toxic", "is_nsfw"}
         boolean_cat_columns: List[str] = []
-        _nested_category_dict = False  # True when categories are inside a dict column
-        if category_column == "auto":
-            # Strategy 1: check for a "category" column that is a dict of bools
-            if hasattr(dataset, "features") and dataset.features:
-                cat_feat = dataset.features.get("category")
-                if isinstance(cat_feat, dict) or (
-                    hasattr(cat_feat, "keys") and callable(cat_feat.keys)
-                ):
-                    # Nested dict schema (e.g. BeaverTails full: category: {name: bool, ...})
-                    from datasets import Value
+        _nested_category_dict = False
 
-                    boolean_cat_columns = [
-                        k for k, v in cat_feat.items()
-                        if isinstance(v, Value) and v.dtype == "bool"
-                    ]
-                    if boolean_cat_columns:
-                        _nested_category_dict = True
-            # Strategy 2: check for top-level bool columns (BeaverTails-Evaluation)
-            if not boolean_cat_columns and hasattr(dataset, "features") and dataset.features:
+        if category_column == "auto":
+            features = dataset.features if hasattr(dataset, "features") else {}
+
+            # Strategy 1: nested dict of bools (e.g. BeaverTails full)
+            if features:
+                for col_name in ["category", "categories", "labels"]:
+                    cat_feat = features.get(col_name)
+                    if cat_feat is not None and (
+                        isinstance(cat_feat, dict)
+                        or (hasattr(cat_feat, "keys") and callable(cat_feat.keys))
+                    ):
+                        from datasets import Value
+
+                        nested_bools = [
+                            k for k, v in cat_feat.items()
+                            if isinstance(v, Value) and v.dtype == "bool"
+                        ]
+                        if nested_bools:
+                            boolean_cat_columns = nested_bools
+                            _nested_category_dict = True
+                            # Override category_column to point to the dict column
+                            category_column = col_name
+                            break
+
+            # Strategy 2: top-level bool columns (e.g. BeaverTails-Evaluation)
+            if not boolean_cat_columns and features:
                 from datasets import Value
 
                 boolean_cat_columns = [
                     k
-                    for k, feat in dataset.features.items()
+                    for k, feat in features.items()
                     if (
                         (isinstance(feat, Value) and feat.dtype == "bool")
                         or (hasattr(feat, "feature") and str(feat) == "bool")
@@ -503,71 +576,107 @@ class RefusalScorePipeline:
                     and k != prompt_column
                     and k not in _NON_CATEGORY_BOOLS
                 ]
-            # Strategy 3: fallback to row-0 inspection
+
+            # Strategy 3: row-0 inspection fallback
             if not boolean_cat_columns and len(dataset) > 0:
-                sample_row = dataset[0]
-                # Check nested dict first
-                cat_val = sample_row.get("category")
-                if isinstance(cat_val, dict):
-                    boolean_cat_columns = [
-                        k for k, v in cat_val.items()
-                        if isinstance(v, bool)
-                    ]
-                    if boolean_cat_columns:
-                        _nested_category_dict = True
-                # Then top-level bools
+                row0 = dataset[0]
+                for col_name in ["category", "categories", "labels"]:
+                    val = row0.get(col_name)
+                    if isinstance(val, dict):
+                        nested_bools = [k for k, v in val.items() if isinstance(v, bool)]
+                        if nested_bools:
+                            boolean_cat_columns = nested_bools
+                            _nested_category_dict = True
+                            category_column = col_name
+                            break
                 if not boolean_cat_columns:
                     boolean_cat_columns = [
-                        k
-                        for k, v in sample_row.items()
+                        k for k, v in row0.items()
                         if isinstance(v, bool)
                         and k != prompt_column
                         and k not in _NON_CATEGORY_BOOLS
                     ]
-            if boolean_cat_columns:
+
+            # Strategy 4: if no bools found, try a string category column
+            if not boolean_cat_columns:
+                for alias in self._CATEGORY_COLUMN_ALIASES:
+                    if alias in available_columns and alias != prompt_column:
+                        category_column = alias
+                        print(f"  Auto-detected string category_column='{category_column}'")
+                        break
+                else:
+                    print("  No category columns found for auto-detection")
+                    category_column = None
+            else:
                 layout = "nested dict" if _nested_category_dict else "top-level"
                 print(f"  Auto-detected {len(boolean_cat_columns)} boolean category columns "
                       f"({layout}): {boolean_cat_columns}")
-            else:
-                print("  No boolean category columns found for auto-detection")
-                category_column = None
 
-        # Convert to list of dicts, normalize prompt column, and extract categories
+        elif category_column and category_column not in ("auto", None):
+            # Explicit category_column — validate with case-insensitive fallback
+            if category_column not in available_columns:
+                col_lower = {c.lower(): c for c in available_columns}
+                if category_column.lower() in col_lower:
+                    actual = col_lower[category_column.lower()]
+                    print(f"  [INFO] category_column '{category_column}' -> '{actual}' "
+                          f"(case mismatch)")
+                    category_column = actual
+                else:
+                    print(f"  [WARN] category_column='{category_column}' not found in dataset. "
+                          f"Available: {available_columns}. Skipping categories.")
+                    category_column = None
+
+        # --- Convert rows ---
         data: List[Dict[str, Any]] = []
+        skipped_no_prompt = 0
         for row_idx, example in enumerate(dataset):
             row = dict(example)
+
+            # Normalize prompt column
             if prompt_column != "prompt":
                 if prompt_column in row:
                     row["prompt"] = row[prompt_column]
-                elif row_idx == 0:
-                    print(f"  [WARN] prompt_column='{prompt_column}' not found in dataset")
+
+            # Validate prompt exists and is a string
+            prompt_val = row.get("prompt")
+            if prompt_val is None or (isinstance(prompt_val, str) and not prompt_val.strip()):
+                skipped_no_prompt += 1
+                continue
+            if not isinstance(prompt_val, str):
+                row["prompt"] = str(prompt_val)
 
             # Extract category label
             if boolean_cat_columns:
                 if _nested_category_dict:
-                    # Nested dict layout: category = {name: bool, ...}
-                    cat_dict = row.get("category", {})
+                    cat_dict = row.get(category_column, {})
                     if isinstance(cat_dict, dict):
                         active_cats = [col for col in boolean_cat_columns if cat_dict.get(col)]
                     else:
                         active_cats = []
                 else:
-                    # Top-level layout: each bool column is a separate key
                     active_cats = [col for col in boolean_cat_columns if row.get(col)]
                 row["category"] = active_cats if active_cats else []
-            elif category_column and category_column != "auto" and category_column in row:
-                row["category"] = row[category_column]
+            elif category_column and category_column in row:
+                cat_val = row[category_column]
+                # Normalize: ClassLabel ints, lists, strings all -> consistent format
+                if isinstance(cat_val, (list, tuple)):
+                    row["category"] = [str(c) for c in cat_val]
+                elif cat_val is not None:
+                    row["category"] = str(cat_val)
+                else:
+                    row["category"] = None
 
-            # Source metadata (Feature 9: audit trail)
-            prompt_text = row.get("prompt")
-            if not isinstance(prompt_text, str):
-                prompt_text = ""
+            # Source metadata (audit trail)
+            prompt_text = row.get("prompt", "")
             row["source_dataset"] = dataset_id
             row["source_split"] = split
             row["source_row_index"] = row_idx
             row["prompt_hash"] = hashlib.sha256(prompt_text.encode()).hexdigest()[:16]
 
             data.append(row)
+
+        if skipped_no_prompt > 0:
+            print(f"  Skipped {skipped_no_prompt} rows with empty/missing prompts")
         print(f"Loaded {len(data)} examples from {split_spec['name']}")
 
         # Deduplicate by prompt_hash
