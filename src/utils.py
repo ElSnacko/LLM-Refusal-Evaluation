@@ -2,7 +2,6 @@ import contextlib
 import gc
 from typing import Dict, List, Union
 
-import ray
 import torch
 from transformers import PreTrainedTokenizer
 from vllm import LLM, TokensPrompt
@@ -34,28 +33,44 @@ def delete_llm(llm: Union[LLM, None]):
 
     destroy_model_parallel()
     destroy_distributed_environment()
-    try:
-        llm.llm_engine.engine_core.shutdown()
-    except AttributeError:
-        try:
-            llm.llm_engine.shutdown()
-        except AttributeError:
-            pass
 
-    try:
-        del llm.llm_engine.model_executor
-    except AttributeError:
+    # Shutdown engine — API changed across vllm versions:
+    # v0.16: llm.llm_engine.engine_core.shutdown()
+    # v0.17: llm.llm_engine.shutdown()
+    # v0.18+: llm_engine removed, uses _run_engine / close()
+    for shutdown_path in [
+        lambda: llm.close(),
+        lambda: llm.llm_engine.engine_core.shutdown(),
+        lambda: llm.llm_engine.shutdown(),
+    ]:
         try:
-            del llm.llm_engine.engine_core.model_executor
-        except AttributeError:
-            pass
+            shutdown_path()
+            break
+        except (AttributeError, TypeError):
+            continue
+
+    # Release model executor if accessible
+    for executor_path in [
+        lambda: delattr(llm, "llm_engine") or None,
+        lambda: delattr(llm.llm_engine, "model_executor") or None,
+        lambda: delattr(llm.llm_engine.engine_core, "model_executor") or None,
+    ]:
+        try:
+            executor_path()
+            break
+        except (AttributeError, TypeError):
+            continue
 
     del llm
     with contextlib.suppress(AssertionError):
         torch.distributed.destroy_process_group()
     gc.collect()
     torch.cuda.empty_cache()
-    ray.shutdown()
+    try:
+        import ray
+        ray.shutdown()
+    except ImportError:
+        pass  # ray not available (vllm >= 0.18 dropped it)
     try:
         vram_usage_after = torch.cuda.memory_allocated() / 1024**2
     except AttributeError:
