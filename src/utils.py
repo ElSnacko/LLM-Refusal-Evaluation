@@ -83,6 +83,7 @@ def encode_conversation(
     add_generation_prompt: bool = True,
 ) -> List[TokensPrompt]:
     batch_messages = []
+    truncation_count = 0
     for example in conversations:
         conv = tokenizer.apply_chat_template(
             example, tokenize=False, add_generation_prompt=add_generation_prompt
@@ -92,10 +93,16 @@ def encode_conversation(
             conv = conv.strip()
         conv = tokenizer.encode(conv, return_tensors=None)
         if len(conv) > (max_model_len - max_new_tokens):
-            print(
-                f"Prompt is too long for the model. Left truncation from {len(conv)} to {max_model_len - max_new_tokens} tokens."
-            )
+            if truncation_count == 0:
+                print(
+                    f"Prompt is too long for the model. Left truncation from {len(conv)} to "
+                    f"{max_model_len - max_new_tokens} tokens."
+                )
+            truncation_count += 1
             conv = conv[len(conv) - (max_model_len - max_new_tokens) :]
         batch_messages.append(TokensPrompt(prompt_token_ids=conv))
+
+    if truncation_count > 1:
+        print(f"  ({truncation_count} prompts truncated total)")
 
     return batch_messages

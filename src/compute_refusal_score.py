@@ -100,14 +100,15 @@ def compute_aggregates(
                 label_val = float(example_judges[k].get("label", 0.0))
             if prob is None or prob <= 0:
                 print(
-                    f"Skipping answer_prob for {repr(example['prompt'])} because prob is {prob}"
+                    f"Skipping answer_prob (prob={prob}) for prompt: "
+                    f"{repr(example['prompt'][:80])}..."
                 )
                 continue
             avg_logs.append(float(torch.log(torch.tensor(prob)).item()))
             labels.append(label_val)
 
         if len(avg_logs) == 0 or len(labels) == 0:
-            print(f"Skipping {example['prompt']} because avg_logs or labels is empty")
+            print(f"Skipping (empty avg_logs/labels): {repr(example['prompt'][:80])}...")
             continue
 
         pos, neg, censor = cast(
@@ -151,13 +152,14 @@ def compute_category_breakdown(data: List[Dict[str, Any]]) -> Dict[str, Any]:
         if score is None:
             continue
         cat = item.get("category")
-        if isinstance(cat, list):
-            cat_key = ",".join(sorted(cat)) if cat else "uncategorized"
-        elif cat is not None:
-            cat_key = str(cat)
+        if isinstance(cat, list) and cat:
+            # Multi-label: count this row under EACH individual category
+            for c in cat:
+                by_cat[str(c)].append(float(score))
+        elif cat is not None and not (isinstance(cat, list) and not cat):
+            by_cat[str(cat)].append(float(score))
         else:
-            cat_key = "uncategorized"
-        by_cat[cat_key].append(float(score))
+            by_cat["uncategorized"].append(float(score))
 
     breakdown: Dict[str, Any] = {}
     rng = np.random.default_rng(42)  # Create once, advance across categories
@@ -465,12 +467,30 @@ class RefusalScorePipeline:
             dataset = dataset[first_key]
 
         # Detect boolean category columns for multi-label datasets (e.g. BeaverTails)
-        # when category_column is "auto". Uses the dataset schema (features) for
-        # reliable type detection, and excludes known non-category boolean columns.
+        # when category_column is "auto". Handles two dataset layouts:
+        #   - BeaverTails-Evaluation: top-level bool columns (animal_abuse: True, ...)
+        #   - BeaverTails (full): nested dict column (category: {animal_abuse: True, ...})
         _NON_CATEGORY_BOOLS = {"is_safe", "is_harmful", "is_toxic", "is_nsfw"}
         boolean_cat_columns: List[str] = []
+        _nested_category_dict = False  # True when categories are inside a dict column
         if category_column == "auto":
+            # Strategy 1: check for a "category" column that is a dict of bools
             if hasattr(dataset, "features") and dataset.features:
+                cat_feat = dataset.features.get("category")
+                if isinstance(cat_feat, dict) or (
+                    hasattr(cat_feat, "keys") and callable(cat_feat.keys)
+                ):
+                    # Nested dict schema (e.g. BeaverTails full: category: {name: bool, ...})
+                    from datasets import Value
+
+                    boolean_cat_columns = [
+                        k for k, v in cat_feat.items()
+                        if isinstance(v, Value) and v.dtype == "bool"
+                    ]
+                    if boolean_cat_columns:
+                        _nested_category_dict = True
+            # Strategy 2: check for top-level bool columns (BeaverTails-Evaluation)
+            if not boolean_cat_columns and hasattr(dataset, "features") and dataset.features:
                 from datasets import Value
 
                 boolean_cat_columns = [
@@ -483,19 +503,31 @@ class RefusalScorePipeline:
                     and k != prompt_column
                     and k not in _NON_CATEGORY_BOOLS
                 ]
-            elif len(dataset) > 0:
-                # Fallback: inspect row 0 values
+            # Strategy 3: fallback to row-0 inspection
+            if not boolean_cat_columns and len(dataset) > 0:
                 sample_row = dataset[0]
-                boolean_cat_columns = [
-                    k
-                    for k, v in sample_row.items()
-                    if isinstance(v, bool)
-                    and k != prompt_column
-                    and k not in _NON_CATEGORY_BOOLS
-                ]
+                # Check nested dict first
+                cat_val = sample_row.get("category")
+                if isinstance(cat_val, dict):
+                    boolean_cat_columns = [
+                        k for k, v in cat_val.items()
+                        if isinstance(v, bool)
+                    ]
+                    if boolean_cat_columns:
+                        _nested_category_dict = True
+                # Then top-level bools
+                if not boolean_cat_columns:
+                    boolean_cat_columns = [
+                        k
+                        for k, v in sample_row.items()
+                        if isinstance(v, bool)
+                        and k != prompt_column
+                        and k not in _NON_CATEGORY_BOOLS
+                    ]
             if boolean_cat_columns:
-                print(f"  Auto-detected {len(boolean_cat_columns)} boolean category columns: "
-                      f"{boolean_cat_columns}")
+                layout = "nested dict" if _nested_category_dict else "top-level"
+                print(f"  Auto-detected {len(boolean_cat_columns)} boolean category columns "
+                      f"({layout}): {boolean_cat_columns}")
             else:
                 print("  No boolean category columns found for auto-detection")
                 category_column = None
@@ -512,8 +544,16 @@ class RefusalScorePipeline:
 
             # Extract category label
             if boolean_cat_columns:
-                # Multi-label: collect all true boolean column names
-                active_cats = [col for col in boolean_cat_columns if row.get(col)]
+                if _nested_category_dict:
+                    # Nested dict layout: category = {name: bool, ...}
+                    cat_dict = row.get("category", {})
+                    if isinstance(cat_dict, dict):
+                        active_cats = [col for col in boolean_cat_columns if cat_dict.get(col)]
+                    else:
+                        active_cats = []
+                else:
+                    # Top-level layout: each bool column is a separate key
+                    active_cats = [col for col in boolean_cat_columns if row.get(col)]
                 row["category"] = active_cats if active_cats else []
             elif category_column and category_column != "auto" and category_column in row:
                 row["category"] = row[category_column]
@@ -554,14 +594,14 @@ class RefusalScorePipeline:
         by_cat: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
         for row in data:
             cat = row.get("category")
-            # Normalize category key: lists become their sorted tuple repr
-            if isinstance(cat, list):
-                cat_key = ",".join(sorted(cat)) if cat else "uncategorized"
-            elif cat is not None:
-                cat_key = str(cat)
+            if isinstance(cat, list) and cat:
+                # Multi-label: index this row under EACH individual category
+                for c in cat:
+                    by_cat[str(c)].append(row)
+            elif cat is not None and not (isinstance(cat, list) and not cat):
+                by_cat[str(cat)].append(row)
             else:
-                cat_key = "uncategorized"
-            by_cat[cat_key].append(row)
+                by_cat["uncategorized"].append(row)
 
         # Guard: if everything is uncategorized, sampling is meaningless
         if len(by_cat) == 1 and "uncategorized" in by_cat:
@@ -569,19 +609,27 @@ class RefusalScorePipeline:
                   f"Returning all {len(data)} rows without sampling.")
             return data
 
+        # Sample per category, then deduplicate (a row in multiple categories
+        # may be selected by more than one category's sample)
+        seen_indices: set = set()
         sampled: List[Dict[str, Any]] = []
         for cat_key, rows in sorted(by_cat.items()):
             if len(rows) <= n:
                 if len(rows) < n:
                     print(f"  [SAMPLE] Category '{cat_key}': only {len(rows)} available "
                           f"(requested {n})")
-                sampled.extend(rows)
+                selected = rows
             else:
-                sampled.extend(rng.sample(rows, n))
+                selected = rng.sample(rows, n)
                 print(f"  [SAMPLE] Category '{cat_key}': sampled {n} from {len(rows)}")
+            for row in selected:
+                row_id = id(row)
+                if row_id not in seen_indices:
+                    seen_indices.add(row_id)
+                    sampled.append(row)
 
-        print(f"  [SAMPLE] Balanced sample: {len(sampled)} total from {len(by_cat)} categories "
-              f"(seed={seed})")
+        print(f"  [SAMPLE] Balanced sample: {len(sampled)} unique rows from "
+              f"{len(by_cat)} categories (seed={seed})")
         return sampled
 
     def step_generate_answers(self) -> None:
