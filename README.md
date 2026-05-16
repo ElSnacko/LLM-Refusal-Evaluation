@@ -23,18 +23,25 @@ The methodology is based on the paper [**"Refusal Steering: Fine-grained Control
 
 ### ✨ Key Features
 
-- **🎯 LLM-as-a-Judge Detection** — Captures nuanced refusals that pattern-matching misses
-- **📊 Confidence Scoring** — Probability-weighted refusal scores for fine-grained analysis
-- **🔬 Multi-benchmark Suite** — Safety, Chinese-sensitive, and sanity-check datasets
-- **⚡ vLLM-powered** — Efficient batch inference with tensor parallelism
-- **📈 Automatic Metrics** — Generates histograms, compliance/rejection percentages, and per-category statistics with bootstrap confidence intervals
-- **🏷️ Category Preservation** — Auto-detects dataset categories (including multi-label boolean columns) and propagates them through the entire pipeline
-- **⚖️ Balanced Sampling** — `--samples-per-category N` for manageable runs on large datasets
-- **🔌 Dataset Adapters** — Built-in column mappings for BeaverTails, WildJailbreak, and SORRY-Bench; load any HuggingFace dataset via CLI
-- **🔍 Audit Trail** — Every output entry includes `source_dataset`, `source_row_index`, `prompt_hash`, and `classification_method` for full traceability
-- **✂️ Truncated Generation** — `--max-new-tokens` CLI override for fast pilot runs
-- **📋 Compliance Quality** — Automatic quality scoring for compliant responses (lexical diversity, hedge phrase detection)
-- **🔗 Merge Utility** — Combine results from multiple runs with prompt-hash deduplication
+- **LLM-as-a-Judge Detection** — Captures nuanced refusals that pattern-matching misses
+- **Confidence Scoring** — Probability-weighted refusal scores for fine-grained analysis
+- **Multi-benchmark Suite** — Safety, Chinese-sensitive, and sanity-check datasets
+- **vLLM 0.21+ powered** — Efficient batch inference with tensor parallelism, CUDA graphs, and chunked prefill
+- **Adaptive Batch Sizing** — Auto-tunes batch size based on GPU VRAM and model context length
+- **Ngram Speculative Decoding** — Faster judge inference without a separate draft model
+- **Heuristic Pre-filter** — Keyword-based pre-classification skips obvious refusals/compliance, reducing LLM judge calls by 30-50%
+- **Parallel Dataset Loading** — ThreadPoolExecutor loads multiple splits concurrently
+- **Incremental Checkpointing** — `.partial` files enable crash recovery mid-batch
+- **FP8/GPTQ/AWQ Quantization** — Run quantized answer models for faster generation
+- **Prefix Caching** — Judge system prompt (~6200 tokens) cached once via vLLM prefix caching
+- **Automatic Metrics** — Generates histograms, compliance/rejection percentages, and per-category statistics with bootstrap confidence intervals
+- **Category Preservation** — Auto-detects dataset categories (including multi-label boolean columns) and propagates them through the entire pipeline
+- **Balanced Sampling** — `--samples-per-category N` for manageable runs on large datasets
+- **Dataset Adapters** — Built-in column mappings for BeaverTails, WildJailbreak, and SORRY-Bench; load any HuggingFace dataset via CLI
+- **Audit Trail** — Every output entry includes `source_dataset`, `source_row_index`, `prompt_hash`, and `classification_method` for full traceability
+- **Truncated Generation** — `--max-new-tokens` CLI override for fast pilot runs
+- **Compliance Quality** — Automatic quality scoring for compliant responses (lexical diversity, hedge phrase detection)
+- **Merge Utility** — Combine results from multiple runs with prompt-hash deduplication
 
 ---
 

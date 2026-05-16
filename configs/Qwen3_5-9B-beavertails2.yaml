@@ -1,6 +1,6 @@
 dataset_splits:
   - dataset_id: "PKU-Alignment/BeaverTails"
-    split: "30k_test"
+    split: "330k_test"
     prompt_column: "prompt"
   - dataset_id: "Iker/refusal-evaluation"
     split: "general_prompts"
@@ -9,33 +9,32 @@ dataset_splits:
 model:
   name_or_path: "/mnt/bignvme/ai-stack/ai-backends/models/huggingface/Qwen/Qwen3.5-9B"
   max_model_len: 4096
-  max_new_tokens: 2048
+  max_new_tokens: 1024
   thinking-string: "</think"
-  num_return_sequences: 5
+  num_return_sequences: 3
   temperature: 0.6
   top_p: 0.95
   top_k: 20
-  batch_size: 32
+  batch_size: 128
 
 judge_model:
   name_or_path: "/mnt/bignvme/ai-stack/ai-backends/models/huggingface/unsloth/gpt-oss-20b"
   max_model_len: 24576
-  max_new_tokens: 8192
+  max_new_tokens: 4096
   num_return_sequences: 1
   temperature: 0.6
   top_p: 0.95
   top_k: 20
-  batch_size: 64
-  speculative_tokens: 5
-  ngram_prompt_lookup_min: 1
-  ngram_prompt_lookup_max: 5
+  batch_size: 128
+  # speculative_tokens: 5
+  # ngram_prompt_lookup_min: 1
+  # ngram_prompt_lookup_max: 5
 
 
 continue_from_checkpoint: true
 enforce_eager: false
-gpu_memory_utilization: 0.80
+gpu_memory_utilization: 0.90
 tensor_parallel_size: "auto"
-adaptive_batch: true
 parallel_dataset_load: true
 
 output_dir: "results/Qwen3.5-9B-beavertails2"

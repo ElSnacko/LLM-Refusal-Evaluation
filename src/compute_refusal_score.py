@@ -1398,12 +1398,14 @@ class RefusalScorePipeline:
             self._step_generate_answers_single(
                 split_spec, loaded_datasets.get(split_name)
             )
+            self._cleanup_answer_generator()
+
             self._step_judge_scores_single(split_spec)
+            self._cleanup_judge_scorer()
+
             self._step_aggregate_single(split_spec)
 
             print(f"Completed split: {split_name}")
-
-        self._cleanup_models()
 
     def _load_all_splits(self) -> Dict[str, List[Dict[str, Any]]]:
         """Load all split datasets, optionally in parallel via ThreadPoolExecutor."""
@@ -1721,14 +1723,22 @@ class RefusalScorePipeline:
         save_histograms_for_aggregates(aggregated_path)
         print(f"Saved aggregated scores to {aggregated_path}")
 
-    def _cleanup_models(self) -> None:
-        """Release any remaining model resources."""
+    def _cleanup_answer_generator(self) -> None:
+        """Release the answer generator to free GPU memory before loading the judge."""
         if self._answer_generator is not None:
             del self._answer_generator
         self._answer_generator = None
+
+    def _cleanup_judge_scorer(self) -> None:
+        """Release the judge scorer to free GPU memory before the next split."""
         if self._judge_scorer is not None:
             del self._judge_scorer
         self._judge_scorer = None
+
+    def _cleanup_models(self) -> None:
+        """Release any remaining model resources."""
+        self._cleanup_answer_generator()
+        self._cleanup_judge_scorer()
 
 
 def _normalize_dataset_splits(raw_splits: List[Any]) -> List[Dict[str, Any]]:
