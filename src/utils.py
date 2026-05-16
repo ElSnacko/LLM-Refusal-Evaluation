@@ -26,7 +26,7 @@ def json_save(data: Any, path: str, indent: bool = False) -> None:
         path: Output file path.
         indent: If True, pretty-print with 2-space indent (for final outputs).
     """
-    opts = orjson.OPT_SERIALIZE_NUMPY | orjson.OPT_ENSURE_ASCII
+    opts = orjson.OPT_SERIALIZE_NUMPY
     if indent:
         opts |= orjson.OPT_INDENT_2
     with open(path, "wb") as f:
