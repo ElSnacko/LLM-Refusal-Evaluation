@@ -32,12 +32,14 @@ class LLMJudge:
         model_name: str,
         max_model_len: int,
         gpu_memory_utilization: float = 0.95,
-        tensor_parallel_size: int = torch.cuda.device_count(),
+        tensor_parallel_size: Optional[int] = None,
         kv_cache_dtype: str = "auto",
     ) -> None:
         self.model_name = model_name
         self.max_model_len = max_model_len
         self.gpu_memory_utilization = gpu_memory_utilization
+        if tensor_parallel_size is None:
+            tensor_parallel_size = torch.cuda.device_count() if torch.cuda.is_available() else 1
         self.tensor_parallel_size = tensor_parallel_size
         self.llm = LLM(
             model=model_name,

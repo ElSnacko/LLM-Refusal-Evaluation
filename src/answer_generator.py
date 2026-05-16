@@ -87,14 +87,14 @@ def parse_log_progs(
             continue
         chosen = max(values, key=lambda x: x.rank)
 
+        current.append(chosen.logprob)
+
         if thinking_string is not None:
             accumulated_text += chosen.decoded_token
             # Check if the thinking_string appears at the end of accumulated text
-            # Switch to answer segment BEFORE appending logprob for delimiter tokens
+            # Switch to answer segment AFTER appending logprob for delimiter tokens
             if accumulated_text.endswith(thinking_string):
                 current = logprobs_answer
-
-        current.append(chosen.logprob)
 
     if thinking_string is None:
         answer_prob = geom_mean_prob(logprobs_answer)
@@ -118,13 +118,15 @@ class GenerateAnswers:
         model_name: str,
         max_model_len: int,
         gpu_memory_utilization: float = 0.95,
-        tensor_parallel_size: int = torch.cuda.device_count(),
+        tensor_parallel_size: Optional[int] = None,
         enforce_eager: bool = False,
         kv_cache_dtype: str = "auto",
     ):
         self.model_name = model_name
         self.max_model_len = max_model_len
         self.gpu_memory_utilization = gpu_memory_utilization
+        if tensor_parallel_size is None:
+            tensor_parallel_size = torch.cuda.device_count() if torch.cuda.is_available() else 1
 
         self.llm = LLM(
             model=model_name,

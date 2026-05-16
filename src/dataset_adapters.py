@@ -37,6 +37,16 @@ def get_adapter_defaults(dataset_id: str) -> Optional[Dict[str, str]]:
     """
     dataset_id_lower = dataset_id.lower()
     for prefix, defaults in KNOWN_ADAPTERS.items():
-        if dataset_id_lower.startswith(prefix.lower()):
-            return dict(defaults)
+        prefix_lower = prefix.lower()
+        if dataset_id_lower.startswith(prefix_lower):
+            # Ensure the match is not just a partial prefix match of a different dataset
+            # e.g., "PKU-something-else" should NOT match "PKU-Alignment/BeaverTails"
+            # After the prefix, either we've reached the end or the next char is a separator
+            if len(dataset_id_lower) == len(prefix_lower):
+                # Exact match (case-insensitive)
+                return dict(defaults)
+            # Check if the next character after the prefix is a path separator
+            # or if the dataset_id contains the prefix as a full component
+            if dataset_id_lower[len(prefix_lower):].startswith(('/', '-')):
+                return dict(defaults)
     return None

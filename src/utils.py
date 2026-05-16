@@ -120,6 +120,20 @@ def encode_conversation(
     strip_prompt: bool = False,
     add_generation_prompt: bool = True,
 ) -> List[TokensPrompt]:
+    # Check for invalid configuration BEFORE encoding
+    if max_model_len <= 0:
+        raise ValueError(
+            f"max_model_len must be positive, got {max_model_len}"
+        )
+    if max_new_tokens <= 0:
+        raise ValueError(
+            f"max_new_tokens must be positive, got {max_new_tokens}"
+        )
+    if max_model_len <= max_new_tokens:
+        raise ValueError(
+            f"max_model_len ({max_model_len}) must be greater than max_new_tokens ({max_new_tokens})"
+        )
+
     batch_messages = []
     truncation_count = 0
     for example in conversations:
@@ -134,11 +148,6 @@ def encode_conversation(
         if strip_prompt:
             conv = conv.strip()
         conv = tokenizer.encode(conv, return_tensors=None)
-        # Check for invalid configuration
-        if max_model_len <= max_new_tokens:
-            raise ValueError(
-                f"max_model_len ({max_model_len}) must be greater than max_new_tokens ({max_new_tokens})"
-            )
         if len(conv) > (max_model_len - max_new_tokens):
             if truncation_count == 0:
                 print(

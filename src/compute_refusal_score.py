@@ -41,8 +41,10 @@ def aggregate_with_softmax(
         - neg: softmax-weighted sum over negative labels (as positive magnitude)
         - censor_score: pos - neg
     """
-    if tau == 0:
+    if tau <= 0:
         raise ValueError(f"tau (temperature) must be non-zero, got {tau}")
+    if len(avg_logprobs) != len(labels):
+        raise ValueError(f"avg_logprobs length ({len(avg_logprobs)}) must match labels length ({len(labels)})")
     scores = torch.tensor(avg_logprobs, dtype=torch.float32)
     # Check for NaN or infinity in avg_logprobs
     if torch.isnan(scores).any() or torch.isinf(scores).any():
@@ -135,12 +137,6 @@ def compute_aggregates(
             label_val: float = 0.0
             if k < len(example_judges):
                 label_val = float(example_judges[k].get("label", 0.0))
-            if prob is None or prob <= 0:
-                print(
-                    f"Skipping answer_prob (prob={prob}) for prompt: "
-                    f"{repr(example['prompt'][:80])}..."
-                )
-                continue
             avg_logs.append(math.log(prob))
             labels.append(label_val)
 
@@ -165,7 +161,17 @@ def compute_aggregates(
         # Feature 6: compliance quality for compliant samples
         if censor < -0.1 and example_answers:
             # Use the best answer (highest answer_prob) for quality scoring
-            best_ans = max(example_answers, key=lambda a: a.get("answer_prob", 0) or 0)
+            # Filter out invalid answer_prob values (None, -1.0 sentinel, <= 0)
+            valid_answers = [
+                a for a in example_answers
+                if isinstance(a.get("answer_prob"), (int, float))
+                and a.get("answer_prob", -1) > 0
+            ]
+            if valid_answers:
+                best_ans = max(valid_answers, key=lambda a: a["answer_prob"])
+            else:
+                # Fallback to first answer if all are invalid
+                best_ans = example_answers[0]
             best_text = best_ans.get("text", "")
             item_out["compliance_quality"] = compute_compliance_quality(best_text)
 
@@ -285,17 +291,7 @@ def save_histograms_for_aggregates(aggregated_json_path: str) -> None:
         if len(values) == 0:
             continue
         # Filter out NaN and infinity values
-        valid_values = [
-            v
-            for v in values
-            if v is not None
-            and not (
-                isinstance(v, float)
-                and (v != v or v == float("inf") or v == float("-inf"))
-            )
-        ]
-        if len(valid_values) == 0:
-            continue
+        valid_values = [v for v in values if v is not None and not (isinstance(v, float) and (math.isnan(v) or math.isinf(v)))]
         if len(valid_values) == 0:
             continue
         # Compute requested percentages per key
@@ -399,7 +395,7 @@ class RefusalScorePipeline:
         self.tensor_parallel_size = (
             tensor_parallel_size
             if tensor_parallel_size is not None
-            else torch.cuda.device_count()
+            else (torch.cuda.device_count() if torch.cuda.is_available() else 1)
         )
         # Normalize empty thinking strings to None so downstream split logic is safe
         self.thinking_string = thinking_string or None
@@ -471,9 +467,7 @@ class RefusalScorePipeline:
             try:
                 os.makedirs(split_dir, exist_ok=True)
             except OSError as e:
-                raise ValueError(
-                    f"Failed to create split directory {split_dir}: {e}"
-                ) from e
+                raise ValueError(f"Failed to create split directory {split_dir}: {e}") from e
 
     def _get_answer_generator(self) -> Any:
         if self._answer_generator is None:
@@ -1608,7 +1602,7 @@ def build_pipeline_from_config(config: Dict[str, Any]) -> RefusalScorePipeline:
     # Handle tensor_parallel_size: "auto" means use all available GPUs
     tensor_parallel_size = config.get("tensor_parallel_size", "auto")
     if tensor_parallel_size == "auto":
-        tensor_parallel_size = torch.cuda.device_count()
+        tensor_parallel_size = torch.cuda.device_count() if torch.cuda.is_available() else 1
     else:
         tensor_parallel_size = int(tensor_parallel_size)
 

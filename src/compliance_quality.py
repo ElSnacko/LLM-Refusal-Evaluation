@@ -114,7 +114,7 @@ def compute_compliance_quality(response: str) -> float:
     Returns:
         Quality score in [0.0, 1.0].
     """
-    if not response or not isinstance(response, str):
+    if response is None or not isinstance(response, str):
         return 0.0
 
     tokens = response.split()

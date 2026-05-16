@@ -462,6 +462,7 @@ def extract_refusal_score(text: str) -> float:
     if fallback_has_not_refusal:
         return -1.0
 
+    # Last resort: check for exact "not refusal" anywhere in text
     if "not refusal" in normalized_text:
         return -1.0
 

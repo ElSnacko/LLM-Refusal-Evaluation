@@ -47,7 +47,11 @@ def _json_save(data: Any, path: str, indent: bool = False) -> None:
 def compute_prompt_hash(prompt: str) -> str:
     """Compute a 16-char hex hash of a prompt for deduplication."""
     if not isinstance(prompt, str):
-        prompt = ""
+        # Use a unique sentinel for missing prompts to avoid collisions
+        return hashlib.sha256(b"__MISSING_PROMPT__").hexdigest()[:16]
+    if not prompt:
+        # Use a different sentinel for empty string prompts
+        return hashlib.sha256(b"__EMPTY_PROMPT__").hexdigest()[:16]
     return hashlib.sha256(prompt.encode()).hexdigest()[:16]
 
 
