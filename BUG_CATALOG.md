@@ -4,10 +4,10 @@ This document catalogs all bugs found during the exploration phase of the refusa
 
 ## Summary
 
-- **Total bugs cataloged**: 30
-- **High severity**: 8
-- **Medium severity**: 17
-- **Low severity**: 5
+- **Total bugs cataloged**: 48
+- **High severity**: 12
+- **Medium severity**: 26
+- **Low severity**: 10
 
 ---
 
@@ -221,12 +221,121 @@ This document catalogs all bugs found during the exploration phase of the refusa
 - **Risk**: May produce corrupted output if input files have inconsistent structures
 - **Fix**: Add validation or schema check
 
+### BUG-031: Checkpoint resumption type validation missing (severity: medium)
+- **Location**: Lines 1077-1087
+- **What**: `dataset_judge_scores = json_load(partial_path)` assumes checkpoint contains valid structure
+- **Risk**: If checkpoint is corrupted or has wrong structure, subsequent operations will fail
+- **Fix**: Add type validation after loading checkpoint to ensure it's List[List[Dict]]
+
+### BUG-032: Silent data loss in parse_log_progs (severity: medium)
+- **Location**: Lines 84-87
+- **What**: Positions with empty logprobs are silently skipped with `continue`
+- **Risk**: Loss of data without user awareness - generated tokens are discarded
+- **Fix**: Log warnings when skipping positions or track skipped count
+
+### BUG-033: geom_mean_prob doesn't validate input types (severity: medium)
+- **Location**: Lines 29-36
+- **What**: Assumes logs contains float/int values but doesn't validate
+- **Risk**: Non-numeric values in logs will cause torch.tensor to fail or produce incorrect results
+- **Fix**: Add type validation for all elements in logs before creating tensor
+
+### BUG-034: extract_refusal_score word boundary issues (severity: low)
+- **Location**: Lines 471-488
+- **What**: Word-by-word analysis with `words[i-1] == "not"` may miss "refusal" in compound words or phrases
+- **Risk**: Phrases like "this is refusal-like behavior" might not be correctly classified
+- **Fix**: Use regex with word boundaries or more sophisticated tokenization
+
+### BUG-035: Index misalignment in judge result processing (severity: high)
+- **Location**: Lines 1156-1158
+- **What**: When an answer entry is missing "text", `result_idx += 1; continue` causes misalignment with batch_results
+- **Risk**: Subsequent LLM-judged pairs will use wrong batch_results entries, leading to index errors or data corruption
+- **Fix**: Don't increment result_idx when skipping; use consistent indexing pattern
+
+### BUG-036: Case-sensitive _NON_CATEGORY_BOOLS check (severity: medium)
+- **Location**: Line 684
+- **What**: `_NON_CATEGORY_BOOLS` set is lowercase but column names may have different casing
+- **Risk**: Columns like "Is_Safe" won't be excluded as intended
+- **Fix**: Use case-insensitive comparison: `k.lower() in _NON_CATEGORY_BOOLS`
+
+### BUG-037: Column name collision with different cases (severity: medium)
+- **Location**: Line 629
+- **What**: `col_lower = {c.lower(): c for c in available_columns}` loses information if two columns differ only by case
+- **Risk**: If dataset has both "Prompt" and "prompt", one is arbitrarily chosen
+- **Fix**: Handle duplicate column names explicitly or raise warning
+
+### BUG-038: Empty prompt hash collision in deduplication (severity: medium)
+- **Location**: Lines 806-819
+- **What**: Rows with empty prompt_hash all get treated as same hash, only first is kept
+- **Risk**: All rows with empty/missing prompt_hash are deduplicated even if they have different content
+- **Fix**: Skip rows with empty prompt_hash or generate unique hash per row
+
+### BUG-039: Missing "answers" key causes KeyError (severity: high)
+- **Location**: Line 98
+- **What**: `example["answers"]` is accessed without checking if key exists
+- **Risk**: If "answers" key is missing, KeyError crashes the pipeline
+- **Fix**: Use `example.get("answers", [])` or validate key exists first
+
+### BUG-040: Path traversal vulnerability in split names (severity: high)
+- **Location**: Line 1256
+- **What**: `os.path.join(self.output_dir, split_spec["name"])` doesn't sanitize split names
+- **Risk**: Malicious split name like "../../../etc/passwd" could write files outside output directory
+- **Fix**: Sanitize split names to only allow alphanumeric, underscore, dash, dot characters
+
+### BUG-041: No validation that answers.json and judges.json are in sync (severity: medium)
+- **Location**: Lines 1495-1497
+- **What**: Only checks if files exist, not if they have matching lengths
+- **Risk**: If answers has 100 examples but judges only has 50, aggregation will produce incomplete results
+- **Fix**: Validate both files have same number of examples before aggregating
+
+### BUG-042: Zero num_return_sequences not validated (severity: medium)
+- **Location**: Line 96 (llm_judge.py)
+- **What**: num_return_sequences=0 could cause vLLM errors or return no outputs
+- **Risk**: Pipeline may crash or produce unexpected results with zero return sequences
+- **Fix**: Add validation for num_return_sequences > 0
+
+### BUG-043: Negative tau validation message is misleading (severity: low)
+- **Location**: Line 45
+- **What**: Error message says "must be non-zero" but check is `tau <= 0`
+- **Risk**: Confusing error message for negative tau values
+- **Fix**: Change message to "must be positive" or "must be greater than zero"
+
+### BUG-044: Whitespace-only thinking_string not normalized (severity: low)
+- **Location**: Line 400 (compute_refusal_score.py)
+- **What**: `thinking_string or None` only normalizes empty string, not whitespace
+- **Risk**: thinking_string="   " would be treated as non-None but won't match anything
+- **Fix**: Use `thinking_string.strip() or None` for normalization
+
+### BUG-045: id() used for row identification is fragile (severity: medium)
+- **Location**: Line 880
+- **What**: `row_id = id(row)` uses memory address which can be reused
+- **Risk**: In rare cases, different rows could have same id() if objects are destroyed
+- **Fix**: Use `index(row)` or a stable identifier like prompt_hash
+
+### BUG-046: Duplicate regex pattern definitions (severity: low)
+- **Location**: Lines 351-367
+- **What**: `_COMPILED_PATTERNS` and `_TAG_PATTERNS` are identical
+- **Risk**: Code duplication, maintenance burden
+- **Fix**: Remove unused `_COMPILED_PATTERNS` definition
+
+### BUG-047: geom_mean_prob torch operations may fail on non-CPU (severity: low)
+- **Location**: Line 31
+- **What**: `torch.tensor(logs, dtype=torch.float32)` creates tensor on default device
+- **Risk**: If CUDA is available but tensor should be on CPU, may cause device mismatch
+- **Fix**: Explicitly specify device: `torch.tensor(logs, dtype=torch.float32, device='cpu')`
+
+### BUG-048: Inconsistent error handling between split processing methods (severity: medium)
+- **Location**: Lines 1156-1158 vs 1449
+- **What**: `step_judge_scores` skips on missing "text" but `_step_judge_scores_single` uses `.get("text", "")`
+- **Risk**: Different behavior in different code paths, inconsistent data handling
+- **Fix**: Use consistent error handling pattern across both methods
+
 ---
 
 ## Summary by Type
 
-- **Crash risks**: BUG-014, BUG-018, BUG-009, BUG-007
-- **Data corruption**: BUG-005, BUG-029, BUG-008
-- **Logic errors**: BUG-006, BUG-013, BUG-021, BUG-028
-- **Type/validation issues**: BUG-004, BUG-010, BUG-026
-- **Code quality**: BUG-001, BUG-002, BUG-003, BUG-024
+- **Crash risks**: BUG-014, BUG-018, BUG-009, BUG-007, BUG-039, BUG-040
+- **Data corruption**: BUG-005, BUG-029, BUG-008, BUG-035, BUG-038, BUG-041
+- **Logic errors**: BUG-006, BUG-013, BUG-021, BUG-028, BUG-045, BUG-048
+- **Type/validation issues**: BUG-004, BUG-010, BUG-026, BUG-036, BUG-037, BUG-042
+- **Code quality**: BUG-001, BUG-002, BUG-003, BUG-024, BUG-043, BUG-044, BUG-046, BUG-047
+- **Security**: BUG-040
