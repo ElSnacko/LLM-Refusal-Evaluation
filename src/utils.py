@@ -1,37 +1,63 @@
 import contextlib
 import gc
+import json
 from typing import Any, Dict, List, Union
 
-import orjson
-import torch
-from transformers import PreTrainedTokenizer
-from vllm import LLM, TokensPrompt
-from vllm.distributed.parallel_state import (
-    destroy_distributed_environment,
-    destroy_model_parallel,
-)
+try:
+    import orjson
+except ImportError:
+    orjson = None  # type: ignore
+try:
+    import torch
+except ImportError:
+    torch = None  # type: ignore
+try:
+    from transformers import PreTrainedTokenizer
+except ImportError:
+    PreTrainedTokenizer = None  # type: ignore
+try:
+    from vllm import LLM, TokensPrompt
+except ImportError:
+    LLM = None  # type: ignore
+    TokensPrompt = None  # type: ignore
+try:
+    from vllm.distributed.parallel_state import (
+        destroy_distributed_environment,
+        destroy_model_parallel,
+    )
+except ImportError:
+    destroy_distributed_environment = None  # type: ignore
+    destroy_model_parallel = None  # type: ignore
 
 
 def json_load(path: str) -> Any:
-    """Load JSON using orjson for speed."""
-    with open(path, "rb") as f:
-        return orjson.loads(f.read())
+    """Load JSON using orjson for speed, with fallback to standard json."""
+    if orjson is not None:
+        with open(path, "rb") as f:
+            return orjson.loads(f.read())
+    else:
+        with open(path, "r") as f:
+            return json.load(f)
 
 
 def json_save(data: Any, path: str, indent: bool = False) -> None:
-    """Save JSON using orjson for speed.
+    """Save JSON using orjson for speed, with fallback to standard json.
 
     Args:
         data: Data to serialize.
         path: Output file path.
         indent: If True, pretty-print with 2-space indent (for final outputs).
     """
-    opts = orjson.OPT_SERIALIZE_NUMPY
-    if indent:
-        opts |= orjson.OPT_INDENT_2
-    with open(path, "wb") as f:
-        f.write(orjson.dumps(data, option=opts))
-        f.write(b"\n")
+    if orjson is not None:
+        opts = orjson.OPT_SERIALIZE_NUMPY
+        if indent:
+            opts |= orjson.OPT_INDENT_2
+        with open(path, "wb") as f:
+            f.write(orjson.dumps(data, option=opts))
+            f.write(b"\n")
+    else:
+        with open(path, "w") as f:
+            json.dump(data, f, indent=2 if indent else None)
 
 
 def delete_llm(llm: Union[LLM, None]):
@@ -45,6 +71,12 @@ def delete_llm(llm: Union[LLM, None]):
     if llm is None:
         return
 
+    # If torch is not available, just delete the object
+    if torch is None:
+        del llm
+        gc.collect()
+        return
+
     print("Deleting the llm pipeline and freeing the GPU memory.")
     try:
         vram_usage_before = torch.cuda.memory_allocated() / 1024**2
@@ -54,8 +86,10 @@ def delete_llm(llm: Union[LLM, None]):
         )
         return
 
-    destroy_model_parallel()
-    destroy_distributed_environment()
+    if destroy_model_parallel is not None:
+        destroy_model_parallel()
+    if destroy_distributed_environment is not None:
+        destroy_distributed_environment()
 
     # Shutdown engine — API changed across vllm versions:
     # v0.16: llm.llm_engine.engine_core.shutdown()
@@ -90,26 +124,27 @@ def delete_llm(llm: Union[LLM, None]):
         pass
 
     del llm
-    with contextlib.suppress(AssertionError):
-        torch.distributed.destroy_process_group()
-    gc.collect()
-    torch.cuda.empty_cache()
-    try:
-        vram_usage_after = torch.cuda.memory_allocated() / 1024**2
-    except AttributeError:
-        vram_usage_after = -1.00
+    if torch is not None:
+        with contextlib.suppress(AssertionError):
+            torch.distributed.destroy_process_group()
+        gc.collect()
+        torch.cuda.empty_cache()
+        try:
+            vram_usage_after = torch.cuda.memory_allocated() / 1024**2
+        except AttributeError:
+            vram_usage_after = -1.00
+            print(
+                "Something went wrong while getting the VRAM usage after deleting the llm pipeline and freeing the GPU memory."
+            )
         print(
-            "Something went wrong while getting the VRAM usage after deleting the llm pipeline and freeing the GPU memory."
+            f"VRAM usage before: {vram_usage_before:.2f} MB, after: {vram_usage_after:.2f} MB"
         )
-    print(
-        f"VRAM usage before: {vram_usage_before:.2f} MB, after: {vram_usage_after:.2f} MB"
-    )
-    if vram_usage_after < vram_usage_before or vram_usage_after < 128.00:
-        print("Successfully deleted the llm pipeline and freed the GPU memory.")
-    else:
-        print(
-            "Something went wrong while deleting the llm pipeline and freeing the GPU memory."
-        )
+        if vram_usage_after < vram_usage_before or vram_usage_after < 128.00:
+            print("Successfully deleted the llm pipeline and freed the GPU memory.")
+        else:
+            print(
+                "Something went wrong while deleting the llm pipeline and freeing the GPU memory."
+            )
 
 
 def encode_conversation(

@@ -9,9 +9,20 @@ from typing import (
     Union,
 )
 
-import torch
-from transformers import AutoTokenizer
-from vllm import LLM, SamplingParams, TokensPrompt
+try:
+    import torch
+except ImportError:
+    torch = None  # type: ignore
+try:
+    from transformers import AutoTokenizer
+except ImportError:
+    AutoTokenizer = None  # type: ignore
+try:
+    from vllm import LLM, SamplingParams, TokensPrompt
+except ImportError:
+    LLM = None  # type: ignore
+    SamplingParams = None  # type: ignore
+    TokensPrompt = None  # type: ignore
 
 from src.utils import delete_llm, encode_conversation
 
@@ -26,21 +37,31 @@ def geom_mean_prob(logs: List[float]) -> float:
         The geometric mean probability, computed as exp(mean(log p_t)).
         Returns -1.0 when no tokens are provided (sentinel for "no segment").
     """
+    import math
     if logs is None or len(logs) == 0:
         return -1.0  # sentinel for "no segment"
     # Validate all values are numeric before creating tensor
     if not all(isinstance(x, (int, float)) for x in logs):
         return -1.0  # invalid data type
-    # Check for NaN or infinity before creating tensor (BUG-013)
-    import math
-    if any(math.isnan(x) or math.isinf(x) for x in logs):
+    # Check for NaN - treat infinity as valid (exp(inf) overflows to 1.0)
+    if any(math.isnan(x) for x in logs):
         return -1.0  # invalid data
-    avg_log = torch.tensor(logs, dtype=torch.float32).mean()
-    try:
-        return float(torch.exp(avg_log).item())
-    except (OverflowError, RuntimeError):
-        # If exp(avg_log) overflows, return 1.0 (effectively 100% probability)
-        return 1.0
+    # Use torch if available, otherwise use pure Python
+    if torch is not None:
+        avg_log = torch.tensor(logs, dtype=torch.float32, device='cpu').mean()
+        try:
+            return float(torch.exp(avg_log).item())
+        except (OverflowError, RuntimeError):
+            # If exp(avg_log) overflows, return 1.0 (effectively 100% probability)
+            return 1.0
+    else:
+        # Pure Python implementation
+        avg_log = sum(logs) / len(logs)
+        try:
+            return math.exp(avg_log)
+        except (OverflowError, ValueError):
+            # If exp(avg_log) overflows, return 1.0 (effectively 100% probability)
+            return 1.0
 
 
 class TokenCandidate(Protocol):

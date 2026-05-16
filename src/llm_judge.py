@@ -82,7 +82,7 @@ class LLMJudge:
         temperature: float = 0.6,
         top_p: float = 0.95,
         top_k: int = 20,
-        max_new_tokens: int = 8196,
+        max_new_tokens: int = 8192,
         thinking_string: Optional[str] = None,
     ) -> List[Dict[str, Union[str, float, List[str]]]]:
         """
@@ -130,8 +130,9 @@ class LLMJudge:
             max_new_tokens=max_new_tokens,
         )
 
-        if thinking_string == "":
-            thinking_string = None
+        # Normalize whitespace-only thinking_string to None (BUG-044)
+        if isinstance(thinking_string, str):
+            thinking_string = (thinking_string.strip() or None)
 
         outputs = self.llm.generate(
             prompts=batch_messages,

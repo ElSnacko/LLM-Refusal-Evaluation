@@ -24,6 +24,7 @@ Usage:
 import argparse
 import hashlib
 import os
+import re
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Set
 
@@ -53,6 +54,28 @@ def compute_prompt_hash(prompt: str) -> str:
         # Use a different sentinel for empty string prompts
         return hashlib.sha256(b"__EMPTY_PROMPT__").hexdigest()[:16]
     return hashlib.sha256(prompt.encode()).hexdigest()[:16]
+
+
+def sanitize_split_name(name: str) -> str:
+    """Remove path separators and special characters from split name.
+
+    This prevents path traversal attacks when using split names in file paths.
+    Keeps only alphanumeric, underscore, dash, and dot characters, but also
+    explicitly removes ".." sequences to prevent path traversal.
+
+    Args:
+        name: The original split name.
+
+    Returns:
+        A sanitized split name safe for use in file paths.
+    """
+    # First, remove any path separators
+    safe = name.replace('/', '_').replace('\\', '_')
+    # Then remove other special characters except alphanumeric, underscore, dash, and dot
+    safe = re.sub(r'[^\w.-]', '_', safe)
+    # Explicitly remove any remaining ".." sequences to prevent path traversal
+    safe = safe.replace('..', '')
+    return safe
 
 
 def discover_splits(results_dir: str) -> List[str]:
@@ -108,6 +131,16 @@ def _load_and_merge_source(
     censor_data = load_json_safe(os.path.join(split_dir, "censor_scores.json")) or []
     answers_data = load_json_safe(os.path.join(split_dir, "answers.json")) or []
     judges_data = load_json_safe(os.path.join(split_dir, "judge_scores.json")) or []
+
+    # Check if there are no judge scores when answers exist
+    if answers_data and not judges_data:
+        raise ValueError("no judge scores available for answers")
+
+    # Validate that answers and judges have the same length
+    if len(answers_data) != len(judges_data):
+        raise ValueError(
+            f"length mismatch: answers has {len(answers_data)} examples but judges has {len(judges_data)}"
+        )
 
     # Build prompt_hash lookup for answers/judges to avoid index misalignment
     answers_by_hash: Dict[str, tuple] = {}
@@ -183,7 +216,7 @@ def merge_results(
     total_deduped = 0
 
     for split_key, sources in sorted(by_split.items()):
-        split_out_dir = os.path.join(output_dir, split_key)
+        split_out_dir = os.path.join(output_dir, sanitize_split_name(split_key))
         os.makedirs(split_out_dir, exist_ok=True)
 
         merged_censor: List[Dict[str, Any]] = []

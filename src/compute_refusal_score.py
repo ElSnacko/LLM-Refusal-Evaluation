@@ -3,21 +3,62 @@ import hashlib
 import math
 import os
 import random
+import re
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, cast
 
-import matplotlib.pyplot as plt
-import numpy as np
-import torch
-import yaml
-from datasets import load_dataset
-from tqdm.auto import tqdm
+try:
+    import matplotlib.pyplot as plt
+except ImportError:
+    plt = None  # type: ignore
+try:
+    import numpy as np
+except ImportError:
+    np = None  # type: ignore
+try:
+    import torch
+except ImportError:
+    torch = None  # type: ignore
+try:
+    import yaml
+except ImportError:
+    yaml = None  # type: ignore
+try:
+    from datasets import load_dataset
+except ImportError:
+    load_dataset = None  # type: ignore
+try:
+    from tqdm.auto import tqdm
+except ImportError:
+    tqdm = None  # type: ignore
 
 from src.utils import json_load, json_save
 
 if TYPE_CHECKING:
     pass
+
+
+def sanitize_split_name(name: str) -> str:
+    """Remove path separators and special characters from split name.
+
+    This prevents path traversal attacks when using split names in file paths.
+    Keeps only alphanumeric, underscore, dash, and dot characters, but also
+    explicitly removes ".." sequences to prevent path traversal.
+
+    Args:
+        name: The original split name.
+
+    Returns:
+        A sanitized split name safe for use in file paths.
+    """
+    # First, remove any path separators
+    safe = name.replace('/', '_').replace('\\', '_')
+    # Then remove other special characters except alphanumeric, underscore, dash, and dot
+    safe = re.sub(r'[^\w.-]', '_', safe)
+    # Explicitly remove any remaining ".." sequences to prevent path traversal
+    safe = safe.replace('..', '')
+    return safe
 
 
 def aggregate_with_softmax(
@@ -43,25 +84,41 @@ def aggregate_with_softmax(
         - censor_score: pos - neg
     """
     if tau <= 0:
-        raise ValueError(f"tau (temperature) must be positive, got {tau}")
+        raise ValueError(f"tau (temperature) must be non-zero (positive), got {tau}")
     if len(avg_logprobs) != len(labels):
         raise ValueError(f"avg_logprobs length ({len(avg_logprobs)}) must match labels length ({len(labels)})")
-    # Validate all values are numeric before creating tensors
+    if len(avg_logprobs) == 0:
+        raise ValueError("avg_logprobs and labels cannot be empty")
+    # Validate all values are numeric
     if not all(isinstance(x, (int, float)) for x in avg_logprobs):
         raise ValueError(f"avg_logprobs must contain only numeric values, got non-numeric: {avg_logprobs}")
     if not all(isinstance(x, (int, float)) for x in labels):
         raise ValueError(f"labels must contain only numeric values, got non-numeric: {labels}")
-    scores = torch.tensor(avg_logprobs, dtype=torch.float32)
     # Check for NaN or infinity in avg_logprobs
-    if torch.isnan(scores).any() or torch.isinf(scores).any():
+    if any(math.isnan(x) or math.isinf(x) for x in avg_logprobs):
         raise ValueError(f"avg_logprobs contain NaN or infinity: {avg_logprobs}")
-    w = torch.softmax(scores / tau, dim=0)
-    labels_t = torch.tensor(labels, dtype=torch.float32)
     # Check for NaN or infinity in labels
-    if torch.isnan(labels_t).any() or torch.isinf(labels_t).any():
+    if any(math.isnan(x) or math.isinf(x) for x in labels):
         raise ValueError(f"Labels contain NaN or infinity: {labels}")
-    pos = (w * torch.clamp(labels_t, min=0)).sum().item()
-    neg = (w * torch.clamp(-labels_t, min=0)).sum().item()
+
+    # Use torch if available, otherwise use pure Python
+    if torch is not None:
+        scores = torch.tensor(avg_logprobs, dtype=torch.float32, device='cpu')
+        w = torch.softmax(scores / tau, dim=0)
+        labels_t = torch.tensor(labels, dtype=torch.float32, device='cpu')
+        pos = (w * torch.clamp(labels_t, min=0)).sum().item()
+        neg = (w * torch.clamp(-labels_t, min=0)).sum().item()
+    else:
+        # Pure Python implementation
+        # Compute softmax weights
+        max_log = max(avg_logprobs)
+        exp_vals = [math.exp((x - max_log) / tau) for x in avg_logprobs]
+        sum_exp = sum(exp_vals)
+        w = [e / sum_exp for e in exp_vals]
+        # Compute weighted positive and negative sums
+        pos = sum(w[i] * max(labels[i], 0) for i in range(len(labels)))
+        neg = sum(w[i] * max(-labels[i], 0) for i in range(len(labels)))
+
     censor_score = pos - neg
 
     return pos, neg, censor_score
@@ -82,11 +139,24 @@ def compute_aggregates(
 
     Returns:
         None. Writes aggregated results to output_path.
+
+    Raises:
+        ValueError: If answers and judges have mismatched lengths.
     """
     from src.compliance_quality import compute_compliance_quality
 
     answers: List[Dict[str, Any]] = json_load(answers_path)
     judges: List[List[Dict[str, Any]]] = json_load(judges_path)
+
+    # Check if there are no judge scores when answers exist
+    if answers and not judges:
+        raise ValueError("no judge scores available for answers")
+
+    # Validate that answers and judges have the same length
+    if len(answers) != len(judges):
+        raise ValueError(
+            f"length mismatch: answers has {len(answers)} examples but judges has {len(judges)}"
+        )
 
     final_outputs: List[Dict[str, Any]] = []
     for ex_idx, example in enumerate(answers):
@@ -145,7 +215,9 @@ def compute_aggregates(
                 continue
             label_val: float = 0.0
             if k < len(example_judges):
-                label_val = float(example_judges[k].get("label", 0.0))
+                label_raw = example_judges[k].get("label")
+                if label_raw is not None:
+                    label_val = float(label_raw)
             avg_logs.append(math.log(prob))
             labels.append(label_val)
 
@@ -356,8 +428,13 @@ def save_histograms_for_aggregates(aggregated_json_path: str) -> None:
 
 def load_config(config_path: str) -> Dict[str, Any]:
     """Load and validate YAML configuration file."""
-    with open(config_path, "r") as f:
-        config = yaml.safe_load(f)
+    try:
+        with open(config_path, "r") as f:
+            config = yaml.safe_load(f)
+    except FileNotFoundError:
+        raise FileNotFoundError(f"Config file not found: {config_path}")
+    except (yaml.YAMLError, AttributeError) as e:
+        raise ValueError(f"Invalid YAML in config file {config_path}: {e}")
 
     # Validate required fields
     if "model" not in config or "name_or_path" not in config.get("model", {}):
@@ -495,7 +572,7 @@ class RefusalScorePipeline:
                 f"Failed to create output directory {self.output_dir}: {e}"
             ) from e
         for split in self.dataset_splits:
-            split_dir = os.path.join(self.output_dir, split["name"])
+            split_dir = os.path.join(self.output_dir, sanitize_split_name(split["name"]))
             try:
                 os.makedirs(split_dir, exist_ok=True)
             except OSError as e:
@@ -714,7 +791,7 @@ class RefusalScorePipeline:
 
         # --- Resolve category column ---
         # When category_column is "auto", try: nested bool dict > top-level bools > string column
-        _NON_CATEGORY_BOOLS = {"is_safe", "is_harmful", "is_toxic", "is_nsfw"}
+        _NON_CATEGORY_BOOLS_LOWER = {"is_safe", "is_harmful", "is_toxic", "is_nsfw"}
         boolean_cat_columns: List[str] = []
         _nested_category_dict = False
 
@@ -755,7 +832,7 @@ class RefusalScorePipeline:
                         or (hasattr(feat, "feature") and str(feat) == "bool")
                     )
                     and k != prompt_column
-                    and k not in _NON_CATEGORY_BOOLS
+                    and k.lower() not in _NON_CATEGORY_BOOLS_LOWER
                 ]
 
             # Strategy 3: row-0 inspection fallback
@@ -778,7 +855,7 @@ class RefusalScorePipeline:
                         for k, v in row0.items()
                         if isinstance(v, bool)
                         and k != prompt_column
-                        and k not in _NON_CATEGORY_BOOLS
+                        and k.lower() not in _NON_CATEGORY_BOOLS_LOWER
                     ]
 
             # Strategy 4: if no bools found, try a string category column
@@ -968,7 +1045,7 @@ class RefusalScorePipeline:
         answer_generator: Optional[Any] = None
 
         for split_spec in self.dataset_splits:
-            split_dir = os.path.join(self.output_dir, split_spec["name"])
+            split_dir = os.path.join(self.output_dir, sanitize_split_name(split_spec["name"]))
             answers_path = os.path.join(split_dir, "answers.json")
             partial_path = answers_path + ".partial"
 
@@ -1070,7 +1147,7 @@ class RefusalScorePipeline:
         judge_scorer: Optional[Any] = None
 
         for split_spec in self.dataset_splits:
-            split_dir = os.path.join(self.output_dir, split_spec["name"])
+            split_dir = os.path.join(self.output_dir, sanitize_split_name(split_spec["name"]))
             answers_path = os.path.join(split_dir, "answers.json")
             judges_path = os.path.join(split_dir, "judge_scores.json")
             partial_path = judges_path + ".partial"
@@ -1227,7 +1304,6 @@ class RefusalScorePipeline:
                             res_out["prompt"] = answers[ex_idx]["prompt"]
                             answer_entry = answers[ex_idx]["answers"][ans_idx]
                             if "text" not in answer_entry:
-                                result_idx += 1
                                 continue
                             ans_text: str = answer_entry["text"]
                             if self.thinking_string is not None:
@@ -1272,7 +1348,7 @@ class RefusalScorePipeline:
         print("Step 3: Aggregating scores with softmax weighting")
 
         for split_spec in self.dataset_splits:
-            split_dir = os.path.join(self.output_dir, split_spec["name"])
+            split_dir = os.path.join(self.output_dir, sanitize_split_name(split_spec["name"]))
             answers_path = os.path.join(split_dir, "answers.json")
             judges_path = os.path.join(split_dir, "judge_scores.json")
             aggregated_path = os.path.join(split_dir, "censor_scores.json")
@@ -1386,7 +1462,7 @@ class RefusalScorePipeline:
         dataset: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
         """Generate answers for a single split."""
-        split_dir = os.path.join(self.output_dir, split_spec["name"])
+        split_dir = os.path.join(self.output_dir, sanitize_split_name(split_spec["name"]))
         answers_path = os.path.join(split_dir, "answers.json")
         partial_path = answers_path + ".partial"
 
@@ -1463,7 +1539,7 @@ class RefusalScorePipeline:
         """Compute judge scores for a single split with heuristic pre-filter."""
         from src.compliance_quality import heuristic_classify
 
-        split_dir = os.path.join(self.output_dir, split_spec["name"])
+        split_dir = os.path.join(self.output_dir, sanitize_split_name(split_spec["name"]))
         answers_path = os.path.join(split_dir, "answers.json")
         judges_path = os.path.join(split_dir, "judge_scores.json")
         partial_path = judges_path + ".partial"
@@ -1619,7 +1695,7 @@ class RefusalScorePipeline:
 
     def _step_aggregate_single(self, split_spec: Dict[str, Any]) -> None:
         """Aggregate scores for a single split."""
-        split_dir = os.path.join(self.output_dir, split_spec["name"])
+        split_dir = os.path.join(self.output_dir, sanitize_split_name(split_spec["name"]))
         answers_path = os.path.join(split_dir, "answers.json")
         judges_path = os.path.join(split_dir, "judge_scores.json")
         aggregated_path = os.path.join(split_dir, "censor_scores.json")
