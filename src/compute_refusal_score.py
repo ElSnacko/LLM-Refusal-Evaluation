@@ -4,6 +4,7 @@ import math
 import os
 import random
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, cast
 
 import matplotlib.pyplot as plt
@@ -378,6 +379,7 @@ class RefusalScorePipeline:
         answer_model_batch_size: int = 32,
         enforce_eager: bool = False,
         kv_cache_dtype: str = "auto",
+        quantization: Optional[str] = None,
         judge_model_max_len: int = 16384,
         judge_max_tokens: int = 8192,
         judge_num_return_sequences: int = 1,
@@ -385,7 +387,12 @@ class RefusalScorePipeline:
         judge_top_p: float = 0.95,
         judge_top_k: int = 20,
         judge_model_batch_size: int = 32,
+        judge_speculative_tokens: Optional[int] = None,
+        judge_ngram_prompt_lookup_min: int = 1,
+        judge_ngram_prompt_lookup_max: int = 5,
         continue_from_checkpoint: bool = False,
+        adaptive_batch: bool = False,
+        parallel_dataset_load: bool = True,
     ) -> None:
         self.dataset_splits = dataset_splits
         self.answer_model_name = answer_model_name
@@ -408,6 +415,7 @@ class RefusalScorePipeline:
         self.answer_model_batch_size = answer_model_batch_size
         self.enforce_eager = enforce_eager
         self.kv_cache_dtype = kv_cache_dtype
+        self.quantization = quantization
         self.judge_model_max_len = judge_model_max_len
         self.judge_max_tokens = judge_max_tokens
         self.judge_num_return_sequences = judge_num_return_sequences
@@ -415,7 +423,12 @@ class RefusalScorePipeline:
         self.judge_top_p = judge_top_p
         self.judge_top_k = judge_top_k
         self.judge_model_batch_size = judge_model_batch_size
+        self.judge_speculative_tokens = judge_speculative_tokens
+        self.judge_ngram_prompt_lookup_min = judge_ngram_prompt_lookup_min
+        self.judge_ngram_prompt_lookup_max = judge_ngram_prompt_lookup_max
         self.continue_from_checkpoint = continue_from_checkpoint
+        self.adaptive_batch = adaptive_batch
+        self.parallel_dataset_load = parallel_dataset_load
         # Lazy-initialized components
         self._answer_generator: Optional[Any] = None
         self._judge_scorer: Optional[Any] = None
@@ -426,32 +439,43 @@ class RefusalScorePipeline:
     def _print_parameters(self) -> None:
         print(f"Computing refusal score for {self.answer_model_name}")
         print(">Parameters:")
-        print(f"  - 📁 Output Dir: {self.output_dir}")
-        print(f"  - ❓ Answer Model: {self.answer_model_name}")
-        print(f"  - 🧑🏻‍⚖️ Judge Model: {self.judge_model_name}")
-        print(f"  - 📊 Dataset Splits: {self.dataset_splits}")
-        print(f"  - 💻 GPU Memory Utilization: {self.gpu_memory_utilization}")
-        print(f"  - 💻 Tensor Parallel Size: {self.tensor_parallel_size}")
-        print(f"  - 💬 Thinking String: {self.thinking_string}")
-        print(f"  - ❓ Answer Model Max Len: {self.answer_model_max_len}")
-        print(f"  - ❓ Answer Max Tokens: {self.answer_max_tokens}")
-        print(f"  - ❓ Answer Num Return Sequences: {self.answer_num_return_sequences}")
-        print(f"  - ❓ Answer Temperature: {self.answer_temperature}")
-        print(f"  - ❓ Answer Top P: {self.answer_top_p}")
-        print(f"  - ❓ Answer Top K: {self.answer_top_k}")
-        print(f"  - ❓ Answer Model Batch Size: {self.answer_model_batch_size}")
-        print(f"  - 🧑🏻‍⚖️ Judge Model Max Len: {self.judge_model_max_len}")
-        print(f"  - 🧑🏻‍⚖️ Judge Max Tokens: {self.judge_max_tokens}")
+        print(f"  - Output Dir: {self.output_dir}")
+        print(f"  - Answer Model: {self.answer_model_name}")
+        print(f"  - Judge Model: {self.judge_model_name}")
+        print(f"  - Dataset Splits: {self.dataset_splits}")
+        print(f"  - GPU Memory Utilization: {self.gpu_memory_utilization}")
+        print(f"  - Tensor Parallel Size: {self.tensor_parallel_size}")
+        print(f"  - Thinking String: {self.thinking_string}")
+        print(f"  - Answer Model Max Len: {self.answer_model_max_len}")
+        print(f"  - Answer Max Tokens: {self.answer_max_tokens}")
+        print(f"  - Answer Num Return Sequences: {self.answer_num_return_sequences}")
+        print(f"  - Answer Temperature: {self.answer_temperature}")
+        print(f"  - Answer Top P: {self.answer_top_p}")
+        print(f"  - Answer Top K: {self.answer_top_k}")
+        print(f"  - Answer Model Batch Size: {self.answer_model_batch_size}")
+        print(f"  - Judge Model Max Len: {self.judge_model_max_len}")
+        print(f"  - Judge Max Tokens: {self.judge_max_tokens}")
         print(
-            f"  - 🧑🏻‍⚖️ Judge Num Return Sequences: {self.judge_num_return_sequences}"
+            f"  - Judge Num Return Sequences: {self.judge_num_return_sequences}"
         )
-        print(f"  - 🧑🏻‍⚖️ Judge Temperature: {self.judge_temperature}")
-        print(f"  - 🧑🏻‍⚖️ Judge Top P: {self.judge_top_p}")
-        print(f"  - 🧑🏻‍⚖️ Judge Top K: {self.judge_top_k}")
-        print(f"  - 🧑🏻‍⚖️ Judge Model Batch Size: {self.judge_model_batch_size}")
-        print(f"  - 🔄 Continue from Checkpoint: {self.continue_from_checkpoint}")
-        print(f"  - ⚡ KV Cache Dtype: {self.kv_cache_dtype}")
-        print(f"  - ⚡ Enforce Eager: {self.enforce_eager}")
+        print(f"  - Judge Temperature: {self.judge_temperature}")
+        print(f"  - Judge Top P: {self.judge_top_p}")
+        print(f"  - Judge Top K: {self.judge_top_k}")
+        print(f"  - Judge Model Batch Size: {self.judge_model_batch_size}")
+        print(f"  - Continue from Checkpoint: {self.continue_from_checkpoint}")
+        print(f"  - KV Cache Dtype: {self.kv_cache_dtype}")
+        print(f"  - Enforce Eager: {self.enforce_eager}")
+        if self.quantization:
+            print(f"  - Quantization: {self.quantization}")
+        if self.judge_speculative_tokens:
+            print(
+                f"  - Judge Speculative Decoding: ngram "
+                f"(num_tokens={self.judge_speculative_tokens}, "
+                f"lookup=[{self.judge_ngram_prompt_lookup_min}, "
+                f"{self.judge_ngram_prompt_lookup_max}])"
+            )
+        print(f"  - Adaptive Batch Sizing: {self.adaptive_batch}")
+        print(f"  - Parallel Dataset Load: {self.parallel_dataset_load}")
         print("-" * 50, end="\n\n")
 
     def _ensure_output_dir(self) -> None:
@@ -461,13 +485,49 @@ class RefusalScorePipeline:
             raise ValueError(
                 f"Failed to create output directory {self.output_dir}: {e}"
             ) from e
-        # Create subdirectories for each split
         for split in self.dataset_splits:
             split_dir = os.path.join(self.output_dir, split["name"])
             try:
                 os.makedirs(split_dir, exist_ok=True)
             except OSError as e:
                 raise ValueError(f"Failed to create split directory {split_dir}: {e}") from e
+
+    @staticmethod
+    def _compute_adaptive_batch_size(
+        max_model_len: int,
+        gpu_memory_utilization: float,
+        tensor_parallel_size: int,
+        num_return_sequences: int = 1,
+        kv_cache_dtype: str = "auto",
+        quantization: Optional[str] = None,
+    ) -> int:
+        """Estimate a safe max_num_seqs from available GPU memory.
+
+        Uses a simple heuristic based on per-GPU VRAM, KV cache cost per
+        sequence, and the model context length. The estimate is conservative
+        (assumes ~6 bytes/token for KV storage in fp16, ~3 in fp8).
+
+        Returns:
+            Estimated max_num_seqs (always >= 4).
+        """
+        try:
+            total_vram_bytes = sum(
+                torch.cuda.get_device_properties(i).total_mem
+                for i in range(tensor_parallel_size)
+            )
+        except (RuntimeError, AttributeError):
+            return 32
+
+        usable_vram = total_vram_bytes * gpu_memory_utilization * 0.5
+        bytes_per_token = 3 if kv_cache_dtype == "fp8" else 6
+        if quantization in ("fp8", "gptq", "awq"):
+            bytes_per_token = max(bytes_per_token // 2, 2)
+        kv_cost_per_seq = max_model_len * bytes_per_token * 2
+        if kv_cost_per_seq == 0:
+            return 32
+        per_gpu_seqs = int(usable_vram / tensor_parallel_size / kv_cost_per_seq)
+        effective = max(per_gpu_seqs // max(num_return_sequences, 1), 4)
+        return min(effective, 4096)
 
     def _get_answer_generator(self) -> Any:
         if self._answer_generator is None:
@@ -480,6 +540,7 @@ class RefusalScorePipeline:
                 tensor_parallel_size=self.tensor_parallel_size,
                 enforce_eager=self.enforce_eager,
                 kv_cache_dtype=self.kv_cache_dtype,
+                quantization=self.quantization,
             )
         return self._answer_generator
 
@@ -493,6 +554,9 @@ class RefusalScorePipeline:
                 gpu_memory_utilization=self.gpu_memory_utilization,
                 tensor_parallel_size=self.tensor_parallel_size,
                 kv_cache_dtype=self.kv_cache_dtype,
+                speculative_max_tokens=self.judge_speculative_tokens,
+                ngram_prompt_lookup_min=self.judge_ngram_prompt_lookup_min,
+                ngram_prompt_lookup_max=self.judge_ngram_prompt_lookup_max,
             )
         return self._judge_scorer
 
@@ -1228,11 +1292,16 @@ class RefusalScorePipeline:
         self._run_per_split()
 
     def _run_per_split(self) -> None:
-        """Process each split through generate→judge→aggregate before starting the next.
+        """Process each split through generate->judge->aggregate before starting the next.
 
         This provides earlier visibility into results, better checkpoint semantics,
         and ensures completed splits have full results even if the pipeline crashes.
         """
+        loaded_datasets = self._load_all_splits()
+
+        if self.adaptive_batch:
+            self._apply_adaptive_batch_sizes()
+
         for split_idx, split_spec in enumerate(self.dataset_splits):
             split_name = split_spec["name"]
             print(f"\n{'=' * 60}")
@@ -1241,7 +1310,9 @@ class RefusalScorePipeline:
             )
             print(f"{'=' * 60}")
 
-            self._step_generate_answers_single(split_spec)
+            self._step_generate_answers_single(
+                split_spec, loaded_datasets.get(split_name)
+            )
             self._step_judge_scores_single(split_spec)
             self._step_aggregate_single(split_spec)
 
@@ -1249,7 +1320,62 @@ class RefusalScorePipeline:
 
         self._cleanup_models()
 
-    def _step_generate_answers_single(self, split_spec: Dict[str, Any]) -> None:
+    def _load_all_splits(self) -> Dict[str, List[Dict[str, Any]]]:
+        """Load all split datasets, optionally in parallel via ThreadPoolExecutor."""
+        results: Dict[str, List[Dict[str, Any]]] = {}
+        if not self.parallel_dataset_load or len(self.dataset_splits) <= 1:
+            for split_spec in self.dataset_splits:
+                results[split_spec["name"]] = self._load_split_dataset(split_spec)
+            return results
+
+        print(f"Loading {len(self.dataset_splits)} splits in parallel...")
+        with ThreadPoolExecutor(max_workers=min(len(self.dataset_splits), 4)) as pool:
+            futures = {
+                pool.submit(self._load_split_dataset, spec): spec["name"]
+                for spec in self.dataset_splits
+            }
+            for future in as_completed(futures):
+                name = futures[future]
+                try:
+                    results[name] = future.result()
+                except Exception as e:
+                    print(f"  [ERROR] Failed to load split '{name}': {e}")
+                    results[name] = []
+        return results
+
+    def _apply_adaptive_batch_sizes(self) -> None:
+        """Override batch sizes with adaptive estimates based on GPU memory."""
+        answer_bs = self._compute_adaptive_batch_size(
+            max_model_len=self.answer_model_max_len,
+            gpu_memory_utilization=self.gpu_memory_utilization,
+            tensor_parallel_size=self.tensor_parallel_size,
+            num_return_sequences=self.answer_num_return_sequences,
+            kv_cache_dtype=self.kv_cache_dtype,
+            quantization=self.quantization,
+        )
+        judge_bs = self._compute_adaptive_batch_size(
+            max_model_len=self.judge_model_max_len,
+            gpu_memory_utilization=self.gpu_memory_utilization,
+            tensor_parallel_size=self.tensor_parallel_size,
+            num_return_sequences=self.judge_num_return_sequences,
+            kv_cache_dtype=self.kv_cache_dtype,
+        )
+        print(
+            f"  [ADAPTIVE] answer_model_batch_size: "
+            f"{self.answer_model_batch_size} -> {answer_bs}"
+        )
+        print(
+            f"  [ADAPTIVE] judge_model_batch_size: "
+            f"{self.judge_model_batch_size} -> {judge_bs}"
+        )
+        self.answer_model_batch_size = answer_bs
+        self.judge_model_batch_size = judge_bs
+
+    def _step_generate_answers_single(
+        self,
+        split_spec: Dict[str, Any],
+        dataset: Optional[List[Dict[str, Any]]] = None,
+    ) -> None:
         """Generate answers for a single split."""
         split_dir = os.path.join(self.output_dir, split_spec["name"])
         answers_path = os.path.join(split_dir, "answers.json")
@@ -1262,7 +1388,8 @@ class RefusalScorePipeline:
             return
 
         answer_generator = self._get_answer_generator()
-        dataset = self._load_split_dataset(split_spec)
+        if dataset is None:
+            dataset = self._load_split_dataset(split_spec)
 
         if len(dataset) == 0:
             print(f"Dataset {split_spec['name']} is empty, skipping...")
@@ -1631,6 +1758,7 @@ def build_pipeline_from_config(config: Dict[str, Any]) -> RefusalScorePipeline:
         answer_model_batch_size=model_config.get("batch_size", 32),
         enforce_eager=config.get("enforce_eager", False),
         kv_cache_dtype=config.get("kv_cache_dtype", "auto"),
+        quantization=config.get("quantization"),
         judge_model_max_len=judge_config.get("max_model_len", 24576),
         judge_max_tokens=judge_config.get("max_new_tokens", 8192),
         judge_num_return_sequences=judge_config.get("num_return_sequences", 1),
@@ -1638,7 +1766,16 @@ def build_pipeline_from_config(config: Dict[str, Any]) -> RefusalScorePipeline:
         judge_top_p=judge_config.get("top_p", 0.95),
         judge_top_k=judge_config.get("top_k", 20),
         judge_model_batch_size=judge_config.get("batch_size", 32),
+        judge_speculative_tokens=judge_config.get("speculative_tokens"),
+        judge_ngram_prompt_lookup_min=judge_config.get(
+            "ngram_prompt_lookup_min", 1
+        ),
+        judge_ngram_prompt_lookup_max=judge_config.get(
+            "ngram_prompt_lookup_max", 5
+        ),
         continue_from_checkpoint=config.get("continue_from_checkpoint", False),
+        adaptive_batch=config.get("adaptive_batch", False),
+        parallel_dataset_load=config.get("parallel_dataset_load", True),
     )
 
 

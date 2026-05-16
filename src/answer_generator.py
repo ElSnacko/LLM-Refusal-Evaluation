@@ -121,12 +121,17 @@ class GenerateAnswers:
         tensor_parallel_size: Optional[int] = None,
         enforce_eager: bool = False,
         kv_cache_dtype: str = "auto",
+        quantization: Optional[str] = None,
     ):
         self.model_name = model_name
         self.max_model_len = max_model_len
         self.gpu_memory_utilization = gpu_memory_utilization
         if tensor_parallel_size is None:
             tensor_parallel_size = torch.cuda.device_count() if torch.cuda.is_available() else 1
+
+        kwargs: Dict[str, object] = {}
+        if quantization:
+            kwargs["quantization"] = quantization
 
         self.llm = LLM(
             model=model_name,
@@ -136,6 +141,7 @@ class GenerateAnswers:
             enforce_eager=enforce_eager,
             kv_cache_dtype=kv_cache_dtype,
             max_model_len=max_model_len,
+            **kwargs,
         )
 
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)

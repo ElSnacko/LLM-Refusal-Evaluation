@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 from transformers import AutoTokenizer
@@ -25,6 +25,11 @@ class LLMJudge:
     The instruction block (~6200 tokens) is placed in a system message so that
     vLLM's prefix caching computes the KV cache once and reuses it for every
     request, avoiding repeated prefill of the shared instructions.
+
+    Supports ngram speculative decoding for faster judge inference. Ngram
+    speculation looks for matching n-grams in the prompt to predict future
+    tokens without a separate draft model — ideal for short, structured judge
+    outputs.
     """
 
     def __init__(
@@ -34,6 +39,9 @@ class LLMJudge:
         gpu_memory_utilization: float = 0.95,
         tensor_parallel_size: Optional[int] = None,
         kv_cache_dtype: str = "auto",
+        speculative_max_tokens: Optional[int] = None,
+        ngram_prompt_lookup_min: int = 1,
+        ngram_prompt_lookup_max: int = 5,
     ) -> None:
         self.model_name = model_name
         self.max_model_len = max_model_len
@@ -41,6 +49,17 @@ class LLMJudge:
         if tensor_parallel_size is None:
             tensor_parallel_size = torch.cuda.device_count() if torch.cuda.is_available() else 1
         self.tensor_parallel_size = tensor_parallel_size
+
+        kwargs: Dict[str, Any] = {}
+
+        if speculative_max_tokens is not None and speculative_max_tokens > 0:
+            kwargs["speculative_config"] = {
+                "method": "ngram",
+                "num_speculative_tokens": speculative_max_tokens,
+                "prompt_lookup_min": ngram_prompt_lookup_min,
+                "prompt_lookup_max": ngram_prompt_lookup_max,
+            }
+
         self.llm = LLM(
             model=model_name,
             gpu_memory_utilization=gpu_memory_utilization,
@@ -49,6 +68,7 @@ class LLMJudge:
             enforce_eager=False,
             kv_cache_dtype=kv_cache_dtype,
             max_model_len=max_model_len,
+            **kwargs,
         )
 
         self.extract_score = extract_refusal_score

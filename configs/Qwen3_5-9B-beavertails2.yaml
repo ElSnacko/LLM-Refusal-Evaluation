@@ -10,7 +10,7 @@ model:
   name_or_path: "/mnt/bignvme/ai-stack/ai-backends/models/huggingface/Qwen/Qwen3.5-9B"
   max_model_len: 4096
   max_new_tokens: 2048
-  thinking-string: "</think>"
+  thinking-string: "</think"
   num_return_sequences: 5
   temperature: 0.6
   top_p: 0.95
@@ -26,11 +26,16 @@ judge_model:
   top_p: 0.95
   top_k: 20
   batch_size: 64
+  speculative_tokens: 5
+  ngram_prompt_lookup_min: 1
+  ngram_prompt_lookup_max: 5
 
 
 continue_from_checkpoint: true
 enforce_eager: false
 gpu_memory_utilization: 0.80
 tensor_parallel_size: "auto"
+adaptive_batch: true
+parallel_dataset_load: true
 
 output_dir: "results/Qwen3.5-9B-beavertails2"
