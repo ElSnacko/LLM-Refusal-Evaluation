@@ -28,6 +28,13 @@ def geom_mean_prob(logs: List[float]) -> float:
     """
     if logs is None or len(logs) == 0:
         return -1.0  # sentinel for "no segment"
+    # Validate all values are numeric before creating tensor
+    if not all(isinstance(x, (int, float)) for x in logs):
+        return -1.0  # invalid data type
+    # Check for NaN or infinity before creating tensor (BUG-013)
+    import math
+    if any(math.isnan(x) or math.isinf(x) for x in logs):
+        return -1.0  # invalid data
     avg_log = torch.tensor(logs, dtype=torch.float32).mean()
     try:
         return float(torch.exp(avg_log).item())

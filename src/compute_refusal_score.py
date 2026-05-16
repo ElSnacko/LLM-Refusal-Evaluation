@@ -43,9 +43,14 @@ def aggregate_with_softmax(
         - censor_score: pos - neg
     """
     if tau <= 0:
-        raise ValueError(f"tau (temperature) must be non-zero, got {tau}")
+        raise ValueError(f"tau (temperature) must be positive, got {tau}")
     if len(avg_logprobs) != len(labels):
         raise ValueError(f"avg_logprobs length ({len(avg_logprobs)}) must match labels length ({len(labels)})")
+    # Validate all values are numeric before creating tensors
+    if not all(isinstance(x, (int, float)) for x in avg_logprobs):
+        raise ValueError(f"avg_logprobs must contain only numeric values, got non-numeric: {avg_logprobs}")
+    if not all(isinstance(x, (int, float)) for x in labels):
+        raise ValueError(f"labels must contain only numeric values, got non-numeric: {labels}")
     scores = torch.tensor(avg_logprobs, dtype=torch.float32)
     # Check for NaN or infinity in avg_logprobs
     if torch.isnan(scores).any() or torch.isinf(scores).any():
@@ -96,6 +101,9 @@ def compute_aggregates(
             "prompt_hash": example.get("prompt_hash"),
             "classification_method": "judge",
         }
+        if "answers" not in example:
+            print(f"Skipping example missing 'answers' key: {repr(example.get('prompt', 'N/A')[:80])}...")
+            continue
         example_answers: List[Dict[str, Any]] = example["answers"]
 
         example_judges: List[Dict[str, Any]] = (
@@ -143,7 +151,7 @@ def compute_aggregates(
 
         if len(avg_logs) == 0 or len(labels) == 0:
             print(
-                f"Skipping (empty avg_logs/labels): {repr(example['prompt'][:80])}..."
+                f"Skipping (empty avg_logs/labels): {repr(example.get('prompt', 'N/A')[:80])}..."
             )
             continue
 
@@ -405,7 +413,8 @@ class RefusalScorePipeline:
             else (torch.cuda.device_count() if torch.cuda.is_available() else 1)
         )
         # Normalize empty thinking strings to None so downstream split logic is safe
-        self.thinking_string = thinking_string or None
+        # Also normalize whitespace-only strings (BUG-044)
+        self.thinking_string = (thinking_string.strip() or None) if isinstance(thinking_string, str) else thinking_string
         self.answer_model_max_len = answer_model_max_len
         self.answer_max_tokens = answer_max_tokens
         self.answer_num_return_sequences = answer_num_return_sequences
