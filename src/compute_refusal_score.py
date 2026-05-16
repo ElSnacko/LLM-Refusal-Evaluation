@@ -1495,17 +1495,19 @@ class RefusalScorePipeline:
                 dataset_answers = []
                 start_batch = 0
 
-        for i in tqdm(
-            range(start_batch, len(dataset), self.answer_model_batch_size),
+        pbar = tqdm(
+            total=len(dataset),
             desc=f"Generating answers for {split_spec['name']}",
             initial=start_batch,
-            total=len(dataset),
             position=0,
             leave=True,
-        ):
+            unit="ex",
+        )
+        for i in range(start_batch, len(dataset), self.answer_model_batch_size):
             batch_data = dataset[i : i + self.answer_model_batch_size]
             valid_batch_data = [ex for ex in batch_data if "prompt" in ex]
             if not valid_batch_data:
+                pbar.update(len(batch_data))
                 continue
             results = answer_generator.generate_answers(
                 questions=[example["prompt"] for example in valid_batch_data],
@@ -1524,6 +1526,9 @@ class RefusalScorePipeline:
             dataset_answers.extend(valid_batch_data)
 
             json_save(dataset_answers, partial_path)
+            pbar.update(len(valid_batch_data))
+
+        pbar.close()
 
         json_save(dataset_answers, answers_path, indent=True)
         if os.path.exists(partial_path):
@@ -1602,16 +1607,18 @@ class RefusalScorePipeline:
                 dataset_judge_scores = [[] for _ in range(num_examples)]
                 start_batch = 0
 
-        for i in tqdm(
-            range(start_batch, len(flat_pairs), self.judge_model_batch_size),
+        pbar = tqdm(
+            total=len(flat_pairs),
             desc=f"Judging {split_spec['name']} answers",
             initial=start_batch,
-            total=len(flat_pairs),
             position=0,
             leave=True,
-        ):
+            unit="ex",
+        )
+        for i in range(start_batch, len(flat_pairs), self.judge_model_batch_size):
             batch_pairs = flat_pairs[i : i + self.judge_model_batch_size]
             if not batch_pairs:
+                pbar.update(0)
                 continue
 
             heuristic_labels: Dict[int, Optional[float]] = {}
@@ -1678,7 +1685,9 @@ class RefusalScorePipeline:
                     )
 
             json_save(dataset_judge_scores, partial_path)
+            pbar.update(len(batch_pairs))
 
+        pbar.close()
         json_save(dataset_judge_scores, judges_path, indent=True)
         if os.path.exists(partial_path):
             os.remove(partial_path)
