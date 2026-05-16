@@ -4,10 +4,10 @@ This document catalogs all bugs found during the exploration phase of the refusa
 
 ## Summary
 
-- **Total bugs cataloged**: 48
-- **High severity**: 12
-- **Medium severity**: 26
-- **Low severity**: 10
+- **Total bugs cataloged**: 70
+- **High severity**: 15
+- **Medium severity**: 40
+- **Low severity**: 15
 
 ---
 
@@ -331,11 +331,163 @@ This document catalogs all bugs found during the exploration phase of the refusa
 
 ---
 
+## File: src/compute_refusal_score.py (Additional bugs)
+
+### BUG-049: YAML config loading missing error handling (severity: high)
+- **Location**: Line 357-368
+- **What**: `load_config` function doesn't catch FileNotFoundError or YAMLError
+- **Risk**: Pipeline crashes with unhelpful error message if config file is missing or malformed
+- **Fix**: Add try/except for FileNotFoundError and yaml.YAMLError with helpful error messages
+
+### BUG-050: No validation that answers.json and judges.json have same length (severity: medium)
+- **Location**: Lines 1283-1288
+- **What**: Only checks if files exist, not if they have matching numbers of examples
+- **Risk**: If answers has N examples but judges has M≠N, aggregation produces incomplete results without warning
+- **Fix**: Validate both files have same number of examples before aggregating
+
+### BUG-051: geom_mean_prob torch.tensor device not specified (severity: low)
+- **Location**: Line 38
+- **What**: `torch.tensor(logs, dtype=torch.float32)` creates tensor on default device
+- **Risk**: If CUDA is available, tensor may be created on GPU even though only CPU operations are needed
+- **Fix**: Specify device='cpu': `torch.tensor(logs, dtype=torch.float32, device='cpu')`
+
+### BUG-052: geom_mean_prob returns -1.0 for mixed valid/invalid data (severity: medium)
+- **Location**: Lines 32-33
+- **What**: If ANY value in logs is non-numeric, returns -1.0 (sentinel) for ENTIRE array
+- **Risk**: Valid data is discarded along with invalid data - silent data loss
+- **Fix**: Filter out invalid values and compute geometric mean on remaining valid values
+
+### BUG-053: Category breakdown with all None scores produces no output (severity: low)
+- **Location**: Lines 193-216
+- **What**: If all scores are None, breakdown is empty with no indication
+- **Risk**: User may not realize no valid data was found
+- **Fix**: Log warning or return special "no_valid_data" indicator
+
+### BUG-054: Category breakdown bootstrap with n=5 may be unstable (severity: low)
+- **Location**: Line 229
+- **What**: Bootstrap only runs if total >= 5, but 5 samples is too small for reliable CI
+- **Risk**: Confidence intervals will be very wide and potentially misleading
+- **Fix**: Increase minimum to 10-20 samples or label CI as "unreliable" for small samples
+
+### BUG-055: Case-insensitive column matching loses duplicate columns (severity: medium)
+- **Location**: Line 707
+- **What**: `col_lower = {c.lower(): c for c in available_columns}` overwrites if two columns differ only by case
+- **Risk**: If dataset has both "Prompt" and "prompt", one is arbitrarily chosen
+- **Fix**: Detect duplicate column names and raise warning or error
+
+### BUG-056: _NON_CATEGORY_BOOLS is case-sensitive (severity: medium)
+- **Location**: Line 723
+- **What**: `_NON_CATEGORY_BOOLS` set contains lowercase values but comparison is case-sensitive
+- **Risk**: Columns like "Is_Safe" won't be excluded as intended
+- **Fix**: Use case-insensitive comparison: `k.lower() in _NON_CATEGORY_BOOLS`
+
+### BUG-057: Balanced sampling with samples_per_category > available samples (severity: low)
+- **Location**: Lines 943-947
+- **What**: Prints warning when samples requested > available, but doesn't handle gracefully
+- **Risk**: User may not realize sampling was limited
+- **Fix**: Clearly document behavior or raise error if insufficient samples
+
+### BUG-058: Thinking string split may produce unexpected results (severity: medium)
+- **Location**: Lines 1127, 1504
+- **What**: `text.split(thinking_string)[-1]` returns entire text if thinking_string not found
+- **Risk**: If thinking_string doesn't exist in text, no split occurs but code assumes split happened
+- **Fix**: Check if thinking_string exists in text before splitting, or use split with maxsplit=1
+
+### BUG-059: geom_mean_prob overflow handling may mask data issues (severity: low)
+- **Location**: Lines 39-43
+- **What**: Returns 1.0 on overflow, which is same as perfect probability
+- **Risk**: Actual overflow issue (extremely large log probs) is masked
+- **Fix**: Log warning or return special value to indicate overflow occurred
+
+### BUG-060: Zero valid score edge case not explicitly handled (severity: low)
+- **Location**: Line 221
+- **What**: Score exactly 0.0 falls between "refusal" (>0.1) and "compliant" (<-0.1)
+- **Risk**: Unclear categorization for exactly-zero scores
+- **Fix**: Document behavior or adjust thresholds to handle 0.0 explicitly
+
+---
+
+## File: src/compute_refusal_score.py (Additional bugs)
+
+### BUG-061: label=None causes TypeError in float conversion (severity: high)
+- **Location**: Line 218
+- **What**: `float(example_judges[k].get("label", 0.0))` crashes when label value is None (not missing)
+- **Risk**: If judge output has `{"label": None}`, .get() returns None (not default 0.0), and float(None) raises TypeError
+- **Fix**: Use `float(example_judges[k].get("label") or 0.0)` or check for None explicitly
+
+### BUG-062: Very small prob values may cause math.log issues (severity: medium)
+- **Location**: Line 219
+- **What**: Denormal probabilities (e.g., 1e-323) pass prob > 0 check but math.log() may have precision issues
+- **Risk**: Potential numerical instability with extremely small probability values
+- **Fix**: Add lower threshold for prob values or use log-sum-exp trick for numerical stability
+
+### BUG-063: Non-string values in questions list not validated (severity: medium)
+- **Location**: answer_generator.py line 217
+- **What**: `questions` list may contain None or non-string values without validation
+- **Risk**: May cause issues downstream in tokenization or encoding
+- **Fix**: Validate/filter questions list to ensure all elements are non-empty strings
+
+### BUG-064: Non-tuple items in questions_answers not validated (severity: medium)
+- **Location**: llm_judge.py line 96
+- **What**: `questions_answers` may contain None or non-tuple items without validation
+- **Risk**: Unpacking will fail if items aren't proper (question, answer) tuples
+- **Fix**: Validate each item is a 2-element tuple/list before processing
+
+### BUG-065: Softmax computation with extreme values may overflow (severity: medium)
+- **Location**: Lines 106-110 (torch path)
+- **What**: Very large logprob values may cause exp() overflow even with max normalization
+- **Risk**: NaN results or crashes with extreme input values
+- **Fix**: Add clipping or use more numerically stable softmax implementation
+
+---
+
+## File: src/utils.py (Additional bugs)
+
+### BUG-066: __del__ during interpreter shutdown may fail (severity: low)
+- **Location**: answer_generator.py line 256-257, llm_judge.py line 171-172
+- **What**: __del__ calls close() which may fail if modules already cleaned up during shutdown
+- **Risk**: Spurious errors during interpreter shutdown
+- **Fix**: Use weakref.finalize() or add try/except in __del__
+
+### BUG-067: Checkpoint resumption doesn't validate data consistency (severity: medium)
+- **Location**: compute_refusal_score.py lines 1057-1067, 1220-1230
+- **What**: Loading checkpoint doesn't verify it has valid structure or consistent length
+- **Risk**: Corrupted checkpoint may cause data corruption or crashes
+- **Fix**: Validate checkpoint structure and consistency before resuming
+
+---
+
+## File: src/compute_refusal_score.py (More bugs)
+
+### BUG-068: Duplicate split names not validated (severity: medium)
+- **Location**: Lines 1726-1784 (_normalize_dataset_splits)
+- **What**: Duplicate split names are detected but error message could be clearer
+- **Risk**: User confusion about which split is duplicated
+- **Fix**: Include line numbers or more context in error message
+
+### BUG-069: Temperature validation only checks <= 0 (severity: low)
+- **Location**: Line 86
+- **What**: Error message says "must be positive" but check is `tau <= 0`
+- **Risk**: Confusing error message for edge case of tau=0 (should say "must be > 0")
+- **Fix**: Change check to `tau <= 0` and message to "must be greater than zero"
+
+---
+
+## File: src/answer_generator.py (Additional bugs)
+
+### BUG-070: Torch tensor creation without explicit device (severity: low)
+- **Location**: Line 51
+- **What**: `torch.tensor(logs, dtype=torch.float32)` uses default device
+- **Risk**: If CUDA is available, tensor created on GPU even though only CPU operations needed
+- **Fix**: Add device='cpu' parameter for consistency
+
+---
+
 ## Summary by Type
 
-- **Crash risks**: BUG-014, BUG-018, BUG-009, BUG-007, BUG-039, BUG-040
-- **Data corruption**: BUG-005, BUG-029, BUG-008, BUG-035, BUG-038, BUG-041
-- **Logic errors**: BUG-006, BUG-013, BUG-021, BUG-028, BUG-045, BUG-048
-- **Type/validation issues**: BUG-004, BUG-010, BUG-026, BUG-036, BUG-037, BUG-042
-- **Code quality**: BUG-001, BUG-002, BUG-003, BUG-024, BUG-043, BUG-044, BUG-046, BUG-047
+- **Crash risks**: BUG-014, BUG-018, BUG-009, BUG-007, BUG-039, BUG-040, BUG-049, BUG-061, BUG-064
+- **Data corruption**: BUG-005, BUG-029, BUG-008, BUG-035, BUG-038, BUG-041, BUG-050, BUG-052, BUG-055, BUG-067
+- **Logic errors**: BUG-006, BUG-013, BUG-021, BUG-028, BUG-045, BUG-048, BUG-053, BUG-054, BUG-057, BUG-058, BUG-059, BUG-060, BUG-065, BUG-069
+- **Type/validation issues**: BUG-004, BUG-010, BUG-026, BUG-036, BUG-037, BUG-042, BUG-051, BUG-056, BUG-062, BUG-063
+- **Code quality**: BUG-001, BUG-002, BUG-003, BUG-024, BUG-043, BUG-044, BUG-046, BUG-047, BUG-066, BUG-068, BUG-070
 - **Security**: BUG-040
