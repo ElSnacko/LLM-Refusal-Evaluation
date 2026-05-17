@@ -10,7 +10,7 @@ model:
   name_or_path: "/mnt/bignvme/ai-stack/ai-backends/models/huggingface/Qwen/Qwen3.5-9B"
   max_model_len: 4096
   max_new_tokens: 1024
-  thinking-string: "</think"
+  thinking-string: "</think>"
   num_return_sequences: 3
   temperature: 0.6
   top_p: 0.95
