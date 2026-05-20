@@ -1382,7 +1382,15 @@ class RefusalScorePipeline:
         This provides earlier visibility into results, better checkpoint semantics,
         and ensures completed splits have full results even if the pipeline crashes.
         """
-        loaded_datasets = self._load_all_splits()
+        # Try to load datasets, but don't fail if dataset isn't available —
+        # steps that need them will skip if answers.json already exists.
+        loaded_datasets: Dict[str, Optional[List[Dict[str, Any]]]] = {}
+        try:
+            loaded_datasets = self._load_all_splits()
+        except Exception as e:
+            print(f"[WARN] Could not load datasets: {e}")
+            print("[WARN] Continuing — will skip generation for splits with existing answers.json")
+            loaded_datasets = {spec["name"]: None for spec in self.dataset_splits}
 
         if self.adaptive_batch:
             self._apply_adaptive_batch_sizes()
