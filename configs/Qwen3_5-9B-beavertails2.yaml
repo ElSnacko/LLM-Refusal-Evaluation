@@ -22,7 +22,7 @@ judge_model:
   max_model_len: 24576
   max_new_tokens: 4096
   num_return_sequences: 1
-  temperature: 0.6
+  temperature: 0.0
   top_p: 0.95
   top_k: 20
   batch_size: 128
